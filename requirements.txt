@@ -6,6 +6,10 @@ psycopg2-binary
 sqlalchemy
 chromadb
 langchain-google-genai
+# Alternate LLM provider, selected with LLM_PROVIDER=groq. Useful for
+# dev/test iterations so Gemini's small daily free-tier quota can be
+# saved for evaluation runs. See app/graph/llm.py.
+langchain-groq
 pydantic
 python-dotenv
 pytest

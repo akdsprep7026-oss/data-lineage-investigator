@@ -2,29 +2,32 @@
 specialist nodes (lineage_agent_node, sql_analysis_node,
 data_quality_node), used by root_cause_node.
 
-Mirrors the GOOGLE_API_KEY fallback pattern used elsewhere in this
-project (see app/graph/sql_review.py, app/retrieval/embeddings.py): if
-GOOGLE_API_KEY is configured, a real Gemini call reasons over the
-evidence to produce ranked hypotheses -- this is what production/
-staging should always do. Otherwise we fall back to a deterministic
-heuristic (surface the top few most-relevant pieces of evidence,
-uncritically) so app.graph.workflow and its tests stay runnable, fast,
-and offline on a fresh checkout with no API key configured.
+Uses whichever provider app/graph/llm.py resolves (Gemini by default,
+Groq when LLM_PROVIDER=groq) to reason over the evidence and produce
+ranked hypotheses -- this is what production/staging should always do.
+If no provider is configured, or a configured one can't be reached for
+this particular call, we fall back to a deterministic heuristic (surface
+the top few most-relevant pieces of evidence, uncritically) so
+app.graph.workflow and its tests stay runnable, fast, and offline on a
+fresh checkout with no API key.
 """
 
 from __future__ import annotations
 
-import os
+import logging
 from typing import Callable
 
-from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
+from app.graph.llm import (
+    LLMUnavailable,
+    build_structured_llm,
+    invoke_structured,
+    llm_enabled,
+)
 from app.graph.state import EvidenceEntry, Hypothesis
 
-load_dotenv()
-
-GEMINI_MODEL = "gemini-flash-latest"
+logger = logging.getLogger(__name__)
 
 MAX_HYPOTHESES = 3
 
@@ -92,11 +95,7 @@ def _llm_generate_hypotheses(
     evidence: list[EvidenceEntry],
     refuted_notes: list[str] | None = None,
 ) -> list[Hypothesis]:
-    from langchain_google_genai import ChatGoogleGenerativeAI
-
-    llm = ChatGoogleGenerativeAI(
-        model=GEMINI_MODEL, temperature=0
-    ).with_structured_output(_RootCauseSchema)
+    llm = build_structured_llm(_RootCauseSchema)
     prompt = (
         "You are a data lineage investigator diagnosing a data quality "
         "incident in a pipeline. Given the reported issue and the "
@@ -111,7 +110,19 @@ def _llm_generate_hypotheses(
         f"Evidence gathered so far:\n{_format_evidence(evidence)}"
         f"{_format_refuted(refuted_notes or [])}"
     )
-    result: _RootCauseSchema = llm.invoke(prompt)
+    try:
+        result: _RootCauseSchema = invoke_structured(
+            llm, prompt, purpose="root-cause synthesis"
+        )
+    except LLMUnavailable as exc:
+        # Without this the whole investigation would die here; instead
+        # it produces weaker hypotheses that validation_node will refuse
+        # to confirm, which is the honest outcome.
+        logger.warning("%s Falling back to the heuristic ranking.", exc)
+        return _heuristic_generate_hypotheses(
+            issue_description, evidence, refuted_notes
+        )
+
     hypotheses = [
         Hypothesis(
             description=item.description,
@@ -166,8 +177,8 @@ def _heuristic_generate_hypotheses(
 
 
 def get_root_cause_generator() -> RootCauseGenerator:
-    """Returns the Gemini-backed generator if GOOGLE_API_KEY is
-    configured, else the offline heuristic fallback."""
-    if os.getenv("GOOGLE_API_KEY"):
+    """Returns the LLM-backed generator if a provider is configured,
+    else the offline heuristic fallback."""
+    if llm_enabled():
         return _llm_generate_hypotheses
     return _heuristic_generate_hypotheses

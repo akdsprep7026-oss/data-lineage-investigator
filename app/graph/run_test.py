@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 from app.db.investigations import get_investigation
+from app.graph.llm import active_model_label
 from app.graph.nodes import MAX_RETRIES, RESOLVE_CONFIDENCE_THRESHOLD
 from app.graph.workflow import run_investigation
 from app.retrieval.ingest import ingest
@@ -86,6 +87,7 @@ def main() -> None:
         raise SystemExit(1)
     incident_module, incident_json_path = INCIDENTS[incident_num]
 
+    print(f"LLM: {active_model_label()}\n")
     print(f"Applying incident #{incident_num} to the sandbox warehouse...\n")
     incident_module.apply()
 

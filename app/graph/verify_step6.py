@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from app.db.investigations import create_investigation, get_investigation
+from app.graph.llm import API_KEY_ENV_VARS, active_model_label
 from app.graph.run_test import INCIDENTS as INCIDENT_FILES
 from app.graph.workflow import run_investigation
 from app.retrieval.ingest import ingest
@@ -137,7 +138,8 @@ def main() -> None:
     offline = "--offline" in arguments
     if offline:
         arguments.remove("--offline")
-        os.environ.pop("GOOGLE_API_KEY", None)
+        for env_var in API_KEY_ENV_VARS.values():
+            os.environ.pop(env_var, None)
 
     selected = arguments or list(INCIDENTS)
     unknown = [key for key in selected if key not in INCIDENTS]
@@ -145,9 +147,7 @@ def main() -> None:
         print(f"Unknown incident(s): {', '.join(unknown)}. Choose from {', '.join(INCIDENTS)}.")
         raise SystemExit(1)
 
-    print(
-        f"Mode: {'offline heuristics (GOOGLE_API_KEY cleared)' if offline else 'live LLM'}\n"
-    )
+    print(f"Mode: {active_model_label()}\n")
     summaries: list[dict[str, Any]] = []
     failures: list[str] = []
 

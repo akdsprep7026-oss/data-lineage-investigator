@@ -1,9 +1,9 @@
 """Tests for the cyclic (Step 6) investigation LangGraph.
 
-Forces the offline heuristic fallbacks (see app/graph/sql_review.py and
-app/graph/root_cause.py) by clearing GOOGLE_API_KEY, so these tests
-exercise the graph deterministically and without any network calls or
-API cost.
+These run against the offline heuristic fallbacks (see
+app/graph/sql_review.py and app/graph/root_cause.py), which tests/
+conftest.py enforces suite-wide by clearing every provider API key, so
+they're deterministic and cost no network calls or API quota.
 
 That fallback is also what makes the retry loop testable for free. The
 heuristic root-cause generator doesn't reason about the evidence, it
@@ -53,8 +53,7 @@ def _validation(confirmed: bool, gap: str = "join_not_present") -> dict:
     }
 
 
-def test_investigation_runs_the_full_cycle_and_persists(monkeypatch):
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+def test_investigation_runs_the_full_cycle_and_persists():
     ingest()
 
     final_state = run_investigation(
@@ -85,11 +84,10 @@ def test_investigation_runs_the_full_cycle_and_persists(monkeypatch):
     assert investigation.workflow_state["max_retries"] == MAX_RETRIES
 
 
-def test_loop_retries_to_the_cap_when_the_hypothesis_is_never_confirmed(monkeypatch):
+def test_loop_retries_to_the_cap_when_the_hypothesis_is_never_confirmed():
     """The offline heuristic can't produce a hypothesis the direct
     re-check will confirm, so this exercises the full retry budget and
     the refusal to claim a root cause at the end of it."""
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     ingest()
 
     final_state = run_investigation("Revenue looks wrong for one day in January.")
@@ -107,10 +105,9 @@ def test_loop_retries_to_the_cap_when_the_hypothesis_is_never_confirmed(monkeypa
     assert investigation.workflow_state["retries_used"] == MAX_RETRIES
 
 
-def test_no_evidence_is_recorded_twice_across_retry_passes(monkeypatch):
+def test_no_evidence_is_recorded_twice_across_retry_passes():
     """`evidence` uses an additive reducer, so a retry re-running an
     agent must not re-append what that agent already contributed."""
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     ingest()
 
     final_state = run_investigation("Daily revenue dropped without explanation.")
@@ -124,8 +121,7 @@ def test_no_evidence_is_recorded_twice_across_retry_passes(monkeypatch):
     assert len(persisted) == len(set(persisted))
 
 
-def test_investigation_can_resume_an_existing_investigation_id(monkeypatch):
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+def test_investigation_can_resume_an_existing_investigation_id():
     ingest()
 
     pre_created = create_investigation("Dashboard shows no data for 2024-01-30")
@@ -292,8 +288,7 @@ def test_human_review_flags_a_weakly_supported_hypothesis_without_asserting_a_ca
     assert refetched.final_root_cause is None
 
 
-def test_lineage_agent_node_tags_evidence_with_lineage_source(monkeypatch):
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+def test_lineage_agent_node_tags_evidence_with_lineage_source():
     ingest()
 
     investigation = create_investigation("revenue calculation region")
@@ -311,9 +306,7 @@ def test_lineage_agent_node_tags_evidence_with_lineage_source(monkeypatch):
     assert result["relevant_tables"]
 
 
-def test_sql_analysis_node_reviews_each_relevant_sql_model_and_flags_inner_join(monkeypatch):
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-
+def test_sql_analysis_node_reviews_each_relevant_sql_model_and_flags_inner_join():
     investigation = create_investigation("test issue")
     state = {
         "investigation_id": str(investigation.id),
@@ -338,9 +331,7 @@ def test_sql_analysis_node_reviews_each_relevant_sql_model_and_flags_inner_join(
     assert "INNER JOIN" in result["evidence"][0]["finding"]
 
 
-def test_data_quality_node_skips_tables_not_in_the_sandbox_warehouse(monkeypatch):
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-
+def test_data_quality_node_skips_tables_not_in_the_sandbox_warehouse():
     investigation = create_investigation("test issue")
     state = {
         "investigation_id": str(investigation.id),
@@ -354,9 +345,7 @@ def test_data_quality_node_skips_tables_not_in_the_sandbox_warehouse(monkeypatch
     assert result["evidence"] == []
 
 
-def test_data_quality_node_checks_a_real_table(monkeypatch):
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-
+def test_data_quality_node_checks_a_real_table():
     investigation = create_investigation("test issue")
     state = {
         "investigation_id": str(investigation.id),
