@@ -11,6 +11,22 @@ Postgres via app/db/investigations.py *on entry and on exit*, so an
 investigation interrupted at any point can be resumed by id with both
 its findings and its position in the loop intact.
 
+As of Step 8 the two nodes that go looking at the outside world --
+lineage_agent_node (the retrieval index) and data_quality_node (the
+sandbox warehouse) -- reach it through MCP tool calls rather than
+in-process function calls. See app/mcp_servers/ for the servers and the
+client. The tools do the same work the direct calls did; what changed is
+that the access is now a declared, transport-agnostic contract instead
+of a Python import.
+
+Two neighbours deliberately still read their sources directly, for
+reasons specific to each: validation_node re-checks a hypothesis against
+the source artifacts *independently* of the evidence-gathering path (see
+app/graph/validation.py), and going through the same tool layer the
+specialists used would undercut that independence; etl_agent_node and
+schema_agent_node read a JSON file and table metadata respectively,
+neither of which Step 8 puts behind a server.
+
 Two consequences of the graph being cyclic that every node here has to
 respect:
 
@@ -51,7 +67,7 @@ from app.graph.state import (
     ValidationOutcome,
 )
 from app.graph.validation import validate_hypothesis
-from app.retrieval.retriever import retrieve
+from app.mcp_servers.client import RETRIEVAL_SERVER, call_tool
 
 # Every specialist agent the manager can dispatch, in the order they run
 # within a pass. lineage_agent always runs (every other specialist
@@ -347,9 +363,11 @@ def manager_node(state: InvestigationState) -> dict:
 
 
 def lineage_agent_node(state: InvestigationState) -> dict:
-    """Uses the Step 4 retriever to find which SQL models/tables are
-    relevant, records that as "lineage" evidence, and hands the specific
-    models/tables off to sql_analysis_node and data_quality_node.
+    """Searches the Step 4 retrieval index -- through the `retrieve`
+    tool on the retrieval MCP server (see app/mcp_servers/) -- to find
+    which SQL models/tables are relevant, records that as "lineage"
+    evidence, and hands the specific models/tables off to the other
+    specialists.
 
     On a retry it searches with manager_node's refocused follow-up query
     rather than the raw issue description, so it surfaces context the
@@ -359,7 +377,9 @@ def lineage_agent_node(state: InvestigationState) -> dict:
 
     _record_transition(state, "lineage_agent")
     query = state.get("follow_up_query") or state["issue_description"]
-    hits = retrieve(query, n_results=5)
+    hits = call_tool(
+        RETRIEVAL_SERVER, "retrieve", {"query": query, "n_results": 5}
+    )["results"]
 
     candidates: list[EvidenceEntry] = []
     relevant_sql_models: list[RelevantSqlModel] = []
@@ -392,7 +412,12 @@ def lineage_agent_node(state: InvestigationState) -> dict:
     # fall back to a type-filtered search so sql_analysis_node always
     # has something concrete to review.
     if not relevant_sql_models:
-        for hit in retrieve(query, filter_type="sql_model", n_results=2):
+        sql_model_hits = call_tool(
+            RETRIEVAL_SERVER,
+            "retrieve",
+            {"query": query, "filter_type": "sql_model", "n_results": 2},
+        )["results"]
+        for hit in sql_model_hits:
             metadata = hit["metadata"]
             relevant_sql_models.append(
                 RelevantSqlModel(
@@ -442,7 +467,12 @@ def sql_analysis_node(state: InvestigationState) -> dict:
 def data_quality_node(state: InvestigationState) -> dict:
     """Runs direct row-count/duplicate-id/null-count checks against
     each table lineage_agent_node flagged as relevant, and records the
-    results as "data_quality" evidence."""
+    results as "data_quality" evidence.
+
+    The warehouse is read through the sandbox-warehouse MCP server (see
+    app/graph/data_quality.py for the checks and app/mcp_servers/ for
+    the tools they're built from), so this node never touches the
+    database it's investigating directly."""
     if not _should_run(state, "data_quality"):
         return {}
 

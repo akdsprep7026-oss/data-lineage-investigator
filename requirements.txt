@@ -15,6 +15,11 @@ python-dotenv
 pytest
 alembic
 
+# Model Context Protocol SDK. Provides both halves of app/mcp_servers/:
+# MCPServer for the two tool servers, and Client for the graph nodes
+# that call them.
+mcp
+
 # Self-contained local Postgres binary (no server install required) used
 # for local dev/testing when DATABASE_URL isn't pointed at a real Postgres.
 pgserver

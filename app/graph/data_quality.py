@@ -7,16 +7,32 @@ null counts run straight against whichever tables lineage_agent_node
 flagged as relevant. This is meant to catch data-hygiene problems an
 LLM reading SQL text alone wouldn't necessarily surface, complementing
 sql_analysis_node's review of the transformation logic itself.
+
+As of Step 8 the warehouse is not touched directly here. Every read goes
+through the MCP server in app/mcp_servers/postgres_server.py, using the
+three tools it publishes: get_schema for the column list,
+check_row_count for the row count, and query_table for the rows the
+duplicate and null checks are computed from. The checks themselves are
+unchanged; only how this module gets at the data has.
+
+That split -- fetch over MCP, aggregate here -- is deliberate. The MCP
+tools stay a small, general, read-only window onto the warehouse
+(exactly the three the Step 8 spec calls for) that any MCP client can
+use, rather than growing a bespoke `count_the_duplicates_for_me` tool
+that only makes sense to this one caller. It costs three tool calls per
+table instead of a handful of aggregate queries, which for a warehouse
+of a few hundred rows is free.
 """
 
 from __future__ import annotations
 
-from typing import Optional, TypedDict
+import logging
+from collections import Counter, defaultdict
+from typing import Any, Optional, TypedDict
 
-from sqlalchemy import inspect, text
-from sqlalchemy.engine import Engine
+from app.mcp_servers.client import POSTGRES_SERVER, call_tool
 
-from app.sandbox_data.models import get_engine
+logger = logging.getLogger(__name__)
 
 # Candidate id-like columns to check for duplicates, in priority order.
 # Not every table has one of these (e.g. fct_daily_revenue doesn't), in
@@ -67,58 +83,84 @@ def _pick_timestamp_column(columns: list[str]) -> Optional[str]:
     return None
 
 
-def run_basic_checks(table_name: str, engine: Optional[Engine] = None) -> TableQualityReport:
+def _day(timestamp: Any) -> str:
+    """The calendar day a timestamp falls on.
+
+    Equivalent to SQLite's DATE() for the values this warehouse stores:
+    every supported timestamp format ('2024-01-15 13:45:22.000000' as
+    SQLite hands it back, or an ISO 'T'-separated string) begins with
+    YYYY-MM-DD.
+    """
+    return str(timestamp)[:10]
+
+
+def _count_repeated_ids(rows: list[dict[str, Any]], id_column: str) -> int:
+    """How many distinct ids appear on more than one row."""
+    occurrences = Counter(row[id_column] for row in rows)
+    return sum(1 for count in occurrences.values() if count > 1)
+
+
+def _count_duplicate_transaction_groups(
+    rows: list[dict[str, Any]], id_column: str, timestamp_column: str
+) -> int:
+    """How many customer/amount/day groups carry more than one id --
+    i.e. the same transaction recorded under multiple ids."""
+    ids_by_group: defaultdict[tuple, set] = defaultdict(set)
+    for row in rows:
+        group = (
+            *(row[column] for column in TRANSACTION_GROUPING_COLUMNS),
+            _day(row[timestamp_column]),
+        )
+        ids_by_group[group].add(row[id_column])
+    return sum(1 for ids in ids_by_group.values() if len(ids) > 1)
+
+
+def run_basic_checks(table_name: str) -> TableQualityReport:
     """Runs row-count, duplicate-id, duplicate-transaction, and null-
-    count checks against one table in the sandbox warehouse.
+    count checks against one table in the sandbox warehouse, reading it
+    through the warehouse MCP server.
 
     Raises ValueError if `table_name` isn't an actual table in the
     sandbox warehouse (e.g. a mart/view name that's never materialized)
     -- callers should treat that as "nothing to check" and move on.
     """
-    engine = engine or get_engine()
-    inspector = inspect(engine)
-    if table_name not in inspector.get_table_names():
+    schema = call_tool(POSTGRES_SERVER, "get_schema", {"table_name": table_name})
+    if not schema["exists"]:
         raise ValueError(f"{table_name!r} is not a table in the sandbox warehouse")
-    columns = [col["name"] for col in inspector.get_columns(table_name)]
+    columns = [column["name"] for column in schema["columns"]]
 
-    with engine.connect() as connection:
-        row_count = connection.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar()
+    count = call_tool(POSTGRES_SERVER, "check_row_count", {"table_name": table_name})
+    row_count = count["row_count"]
 
-        id_column = _pick_id_column(columns)
-        duplicate_id_count = 0
-        if id_column:
-            duplicate_id_count = connection.execute(
-                text(
-                    f"SELECT COUNT(*) FROM ("
-                    f"SELECT {id_column} FROM {table_name} "
-                    f"GROUP BY {id_column} HAVING COUNT(*) > 1"
-                    f")"
-                )
-            ).scalar()
+    table = call_tool(POSTGRES_SERVER, "query_table", {"table_name": table_name})
+    rows = table["rows"]
+    if table["truncated"]:
+        # Can't happen for the sandbox (its largest table is ~215 rows
+        # against a 5000-row ceiling), but the counts below would
+        # silently under-report if it ever did, so say so loudly.
+        logger.warning(
+            "%s returned a truncated row set (%d of %d rows); duplicate and "
+            "null counts below are computed from the truncated set.",
+            table_name,
+            len(rows),
+            row_count,
+        )
 
-        duplicate_transaction_groups: Optional[int] = None
-        timestamp_column = _pick_timestamp_column(columns)
-        has_grouping_columns = all(col in columns for col in TRANSACTION_GROUPING_COLUMNS)
-        if id_column and timestamp_column and has_grouping_columns:
-            grouping_columns = ", ".join(TRANSACTION_GROUPING_COLUMNS)
-            duplicate_transaction_groups = connection.execute(
-                text(
-                    f"SELECT COUNT(*) FROM ("
-                    f"SELECT {grouping_columns}, DATE({timestamp_column}) AS day "
-                    f"FROM {table_name} "
-                    f"GROUP BY {grouping_columns}, DATE({timestamp_column}) "
-                    f"HAVING COUNT(DISTINCT {id_column}) > 1"
-                    f")"
-                )
-            ).scalar()
+    id_column = _pick_id_column(columns)
+    duplicate_id_count = _count_repeated_ids(rows, id_column) if id_column else 0
 
-        null_counts = {
-            column: connection.execute(
-                text(f"SELECT COUNT(*) FROM {table_name} WHERE {column} IS NULL")
-            ).scalar()
-            for column in columns
-        }
-        null_counts = {column: count for column, count in null_counts.items() if count}
+    duplicate_transaction_groups: Optional[int] = None
+    timestamp_column = _pick_timestamp_column(columns)
+    has_grouping_columns = all(col in columns for col in TRANSACTION_GROUPING_COLUMNS)
+    if id_column and timestamp_column and has_grouping_columns:
+        duplicate_transaction_groups = _count_duplicate_transaction_groups(
+            rows, id_column, timestamp_column
+        )
+
+    null_counts = {
+        column: sum(1 for row in rows if row[column] is None) for column in columns
+    }
+    null_counts = {column: count for column, count in null_counts.items() if count}
 
     return TableQualityReport(
         table=table_name,

@@ -57,15 +57,44 @@ which is why the give-up path exists.
 Retrieval embeddings are chosen separately in
 `app/retrieval/embeddings.py`, since Groq has no embeddings endpoint.
 
+## MCP tool servers
+
+The tools the agents use to look at the world are exposed over the Model
+Context Protocol rather than called as Python functions, so they can be
+driven by any MCP client and carry a declared schema:
+
+| Server | Tools | Wraps |
+| --- | --- | --- |
+| `app/mcp_servers/postgres_server.py` | `get_schema`, `check_row_count`, `query_table` | Read-only access to the sandbox warehouse |
+| `app/mcp_servers/retrieval_server.py` | `retrieve` | Similarity search over the Chroma index |
+
+Both speak MCP over stdio and can be run standalone:
+
+```bash
+python -m app.mcp_servers.postgres_server
+python -m app.mcp_servers.retrieval_server
+```
+
+`lineage_agent_node` and `data_quality_node` call them through
+`app/mcp_servers/client.py`, which spawns each server on first use and
+bridges the async SDK to the synchronous graph nodes. `validation_node`
+still reads the source artifacts directly, deliberately: it exists to
+re-check a hypothesis *independently* of the path the specialists took.
+
+The warehouse server is read-only by construction — SELECT only, with
+table and filter-column names validated against the live schema and
+filter values bound as parameters.
+
 ## Project Structure
 
 ```
 /app
-  /agents        # Agent definitions
-  /graph         # LangGraph workflow graphs
-  /retrieval     # Retrieval / vector store logic
-  /sandbox_data  # Sample/sandbox data for local testing
-  /db            # Database models and access
   /api           # FastAPI application
+  /db            # Database models and access (the investigations table)
+  /graph         # LangGraph workflow, nodes and evaluation harness
+  /mcp_servers   # MCP tool servers + the client the nodes call them through
+  /retrieval     # Retrieval / vector store logic
+  /sandbox_data  # Sandbox warehouse, SQL models and incident scenarios
+/alembic         # Database migrations
 /tests           # Test suite
 ```
