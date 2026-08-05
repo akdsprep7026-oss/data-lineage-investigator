@@ -33,6 +33,16 @@ class Investigation(Base):
       evidence:   [{"source": ..., "finding": ..., "confidence": ...}, ...]
       hypotheses: [{"description": ..., "supporting_evidence": [...],
                      "confidence_score": ...}, ...]
+
+    `workflow_state` holds the loop-control position of the LangGraph
+    workflow (which node last ran, how many retries have been spent,
+    which agents are scheduled//have run, what validation refuted). It's
+    rewritten at every node transition so an investigation interrupted
+    mid-loop can be resumed at the right pass rather than from scratch:
+
+      workflow_state: {"current_node": ..., "retry_count": ...,
+                       "agents_to_run": [...], "agents_completed": [...],
+                       "validation_notes": [...]}
     """
 
     __tablename__ = "investigations"
@@ -61,6 +71,9 @@ class Investigation(Base):
     )
     hypotheses: Mapped[list] = mapped_column(
         JSONB, nullable=False, default=list, server_default="[]"
+    )
+    workflow_state: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
     )
     final_root_cause: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

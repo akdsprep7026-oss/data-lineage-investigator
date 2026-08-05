@@ -32,7 +32,12 @@ MAX_HYPOTHESES = 3
 # its hypotheses are capped at a middling confidence.
 HEURISTIC_CONFIDENCE_CAP = 0.6
 
-RootCauseGenerator = Callable[[str, list[EvidenceEntry]], list[Hypothesis]]
+# (issue_description, evidence, refuted_notes) -> ranked hypotheses.
+# `refuted_notes` carries the explanations previous passes of the graph
+# already checked against the warehouse and ruled out (see
+# app/graph/validation.py), so a retry proposes something genuinely new
+# instead of restating a claim that has already failed verification.
+RootCauseGenerator = Callable[[str, list[EvidenceEntry], list[str]], list[Hypothesis]]
 
 
 class _HypothesisItem(BaseModel):
@@ -69,8 +74,23 @@ def _format_evidence(evidence: list[EvidenceEntry]) -> str:
     )
 
 
+def _format_refuted(refuted_notes: list[str]) -> str:
+    if not refuted_notes:
+        return ""
+    ruled_out = "\n".join(f"- {note}" for note in refuted_notes)
+    return (
+        "\n\nThese explanations were proposed on an earlier pass and then "
+        "checked directly against the warehouse, and did NOT hold up. Do "
+        "not propose them again; account for why the check came back the "
+        "way it did and look elsewhere:\n"
+        f"{ruled_out}"
+    )
+
+
 def _llm_generate_hypotheses(
-    issue_description: str, evidence: list[EvidenceEntry]
+    issue_description: str,
+    evidence: list[EvidenceEntry],
+    refuted_notes: list[str] | None = None,
 ) -> list[Hypothesis]:
     from langchain_google_genai import ChatGoogleGenerativeAI
 
@@ -89,6 +109,7 @@ def _llm_generate_hypotheses(
         "believe is responsible.\n\n"
         f"Issue: {issue_description}\n\n"
         f"Evidence gathered so far:\n{_format_evidence(evidence)}"
+        f"{_format_refuted(refuted_notes or [])}"
     )
     result: _RootCauseSchema = llm.invoke(prompt)
     hypotheses = [
@@ -103,12 +124,28 @@ def _llm_generate_hypotheses(
 
 
 def _heuristic_generate_hypotheses(
-    issue_description: str, evidence: list[EvidenceEntry]
+    issue_description: str,
+    evidence: list[EvidenceEntry],
+    refuted_notes: list[str] | None = None,
 ) -> list[Hypothesis]:
     """Offline fallback used when GOOGLE_API_KEY isn't configured: just
     surfaces the top few most-relevant pieces of evidence gathered so
     far as hypotheses, rather than actually reasoning about them. Good
-    enough to exercise the graph end to end without a network call."""
+    enough to exercise the graph end to end without a network call.
+
+    It can't reason about `refuted_notes`, so it settles for not
+    re-proposing evidence a previous pass already had refuted -- which
+    is also what makes a retry surface the next-best candidate instead
+    of looping on the same one."""
+    refuted_text = " ".join(refuted_notes or [])
+    candidates = [
+        item
+        for item in evidence
+        # A validation finding is a verdict on a hypothesis, not a
+        # candidate root cause in its own right.
+        if item["source"] != "validation" and item["finding"] not in refuted_text
+    ]
+    evidence = candidates or evidence
     if not evidence:
         return [
             Hypothesis(

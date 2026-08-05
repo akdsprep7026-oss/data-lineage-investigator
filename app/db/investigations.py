@@ -74,6 +74,7 @@ def update_investigation(
     add_evidence: Optional[dict[str, Any]] = None,
     add_hypothesis: Optional[dict[str, Any]] = None,
     final_root_cause: Optional[str] = None,
+    workflow_state: Optional[dict[str, Any]] = None,
     session: Optional[Session] = None,
 ) -> Optional[Investigation]:
     """Applies a partial update to an existing investigation:
@@ -81,6 +82,9 @@ def update_investigation(
         object to the evidence JSONB list.
       - add_hypothesis: appends one {"description", "supporting_evidence",
         "confidence_score"} object to the hypotheses JSONB list.
+      - workflow_state: replaces the loop-control snapshot wholesale
+        (unlike evidence/hypotheses, it's a current position, not an
+        append-only log).
       - status / final_root_cause: set directly if provided.
 
     All arguments besides investigation_id are optional so callers can
@@ -101,6 +105,8 @@ def update_investigation(
             investigation.evidence = [*investigation.evidence, add_evidence]
         if add_hypothesis is not None:
             investigation.hypotheses = [*investigation.hypotheses, add_hypothesis]
+        if workflow_state is not None:
+            investigation.workflow_state = dict(workflow_state)
         if status is not None:
             investigation.status = status
         if final_root_cause is not None:
