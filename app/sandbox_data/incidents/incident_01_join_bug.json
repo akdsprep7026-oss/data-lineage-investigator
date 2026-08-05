@@ -1,0 +1,15 @@
+{
+  "incident_id": "01_join_bug",
+  "title": "Revenue undercounting from a bad INNER JOIN",
+  "issue_description": "Total revenue for 2024-01-20 looks lower than expected -- a handful of completed orders placed by recently-signed-up customers seem to be missing from the fct_daily_revenue dashboard metric entirely.",
+  "ground_truth_root_cause": "sql_models/01_stg_orders_cleaned.sql joins raw_orders to raw_customers using an INNER JOIN. Orders placed by customers whose customer_id hasn't yet landed in raw_customers (e.g. a brand-new signup still propagating through the customer sync job) are silently dropped by the INNER JOIN instead of being kept (with a fallback/unknown region), undercounting revenue in fct_daily_revenue for any day with such orders.",
+  "ground_truth_location": {
+    "sql_model": "app/sandbox_data/sql_models/01_stg_orders_cleaned.sql",
+    "table": "stg_orders_cleaned",
+    "job": "build_stg_orders_cleaned",
+    "detail": "The JOIN between raw_orders (alias o) and raw_customers (alias c) should be a LEFT JOIN, not an INNER JOIN."
+  },
+  "affected_date": "2024-01-20",
+  "apply_command": "python -m app.sandbox_data.incidents.manage apply 1",
+  "reset_command": "python -m app.sandbox_data.incidents.manage reset"
+}

@@ -1,0 +1,16 @@
+{
+  "incident_id": "04_duplicate_rows",
+  "title": "Revenue inflation from duplicated orders with new order_ids",
+  "issue_description": "Total revenue for 2024-01-15 looks unusually high compared to neighboring days -- almost like some orders were counted twice.",
+  "ground_truth_root_cause": "On 2024-01-15, ~15 completed orders were re-emitted by the upstream order source with brand-new order_id values for what is actually the same underlying transaction (e.g. a checkout-retry / double-submit bug). sql_models/01_stg_orders_cleaned.sql only de-duplicates on order_id (ROW_NUMBER() PARTITION BY order_id), so these rows look like distinct legitimate orders and are not filtered out, inflating that day's revenue in fct_daily_revenue.",
+  "ground_truth_location": {
+    "table": "raw_orders",
+    "date": "2024-01-15",
+    "sql_model": "app/sandbox_data/sql_models/01_stg_orders_cleaned.sql",
+    "job": "build_stg_orders_cleaned",
+    "detail": "The dedup window function only catches duplicate rows that share the same order_id; it cannot catch duplicate transactions that were assigned distinct order_id values."
+  },
+  "affected_date": "2024-01-15",
+  "apply_command": "python -m app.sandbox_data.incidents.manage apply 4",
+  "reset_command": "python -m app.sandbox_data.incidents.manage reset"
+}

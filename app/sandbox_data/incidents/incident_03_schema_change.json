@@ -1,0 +1,15 @@
+{
+  "incident_id": "03_schema_change",
+  "title": "Breaking upstream schema change (renamed column)",
+  "issue_description": "The build_stg_orders_cleaned job is failing on every run with a database error, and stg_orders_cleaned / fct_daily_revenue haven't updated since the failure started.",
+  "ground_truth_root_cause": "raw_orders.created_at was renamed to raw_orders.order_created_at (an upstream source schema change) but sql_models/01_stg_orders_cleaned.sql still references the old column name (o.created_at), so every run fails with a 'no such column: o.created_at' database error. Because the job fails before committing, stg_orders_cleaned and fct_daily_revenue are frozen at their last successful state rather than being corrupted.",
+  "ground_truth_location": {
+    "table": "raw_orders",
+    "column": "created_at (renamed to order_created_at)",
+    "sql_model": "app/sandbox_data/sql_models/01_stg_orders_cleaned.sql",
+    "job": "build_stg_orders_cleaned",
+    "detail": "Column reference o.created_at in the SQL model no longer exists in raw_orders."
+  },
+  "apply_command": "python -m app.sandbox_data.incidents.manage apply 3",
+  "reset_command": "python -m app.sandbox_data.incidents.manage reset"
+}

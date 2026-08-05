@@ -1,0 +1,15 @@
+{
+  "incident_id": "02_stale_pipeline",
+  "title": "Stale fct_daily_revenue from a failing Airflow job",
+  "issue_description": "The 'Total Revenue by Region' dashboard shows no data for the last two days (2024-01-29 and 2024-01-30), even though the business was clearly still taking orders on those days.",
+  "ground_truth_root_cause": "The build_fct_daily_revenue job has been failing for the last 2 days (connection timeouts to the warehouse) and has not successfully refreshed fct_daily_revenue since 2024-01-28T15:15:07Z. The upstream stg_orders_cleaned table is fully up to date; fct_daily_revenue is simply stale because the job that populates it stopped succeeding.",
+  "ground_truth_location": {
+    "job": "build_fct_daily_revenue",
+    "table": "fct_daily_revenue",
+    "pipeline_jobs_entry": "pipeline_jobs.json -> jobs[?job_name == 'build_fct_daily_revenue']",
+    "detail": "Job's last_run_status is 'failed' and last_run_at is 2 days stale; no rows exist in fct_daily_revenue for the last 2 days of the window."
+  },
+  "affected_dates": ["2024-01-29", "2024-01-30"],
+  "apply_command": "python -m app.sandbox_data.incidents.manage apply 2",
+  "reset_command": "python -m app.sandbox_data.incidents.manage reset"
+}

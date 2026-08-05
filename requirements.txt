@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+langgraph
+langchain
+psycopg2-binary
+sqlalchemy
+chromadb
+langchain-google-genai
+pydantic
+python-dotenv
+pytest
+alembic
+
+# Self-contained local Postgres binary (no server install required) used
+# for local dev/testing when DATABASE_URL isn't pointed at a real Postgres.
+pgserver

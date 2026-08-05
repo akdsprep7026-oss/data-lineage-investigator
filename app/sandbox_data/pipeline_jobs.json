@@ -1,0 +1,47 @@
+{
+  "jobs": [
+    {
+      "job_name": "build_stg_orders_cleaned",
+      "schedule": "0 * * * *",
+      "sql_model": "sql_models/01_stg_orders_cleaned.sql",
+      "upstream_tables": [
+        "raw_orders",
+        "raw_customers"
+      ],
+      "downstream_tables": [
+        "stg_orders_cleaned"
+      ],
+      "last_run_status": "success",
+      "last_run_duration_seconds": 42,
+      "last_run_at": "2024-01-30T06:00:12Z"
+    },
+    {
+      "job_name": "build_fct_daily_revenue",
+      "schedule": "15 * * * *",
+      "sql_model": "sql_models/02_fct_daily_revenue.sql",
+      "upstream_tables": [
+        "stg_orders_cleaned"
+      ],
+      "downstream_tables": [
+        "fct_daily_revenue"
+      ],
+      "last_run_status": "success",
+      "last_run_duration_seconds": 18,
+      "last_run_at": "2024-01-30T06:15:07Z"
+    },
+    {
+      "job_name": "build_fct_daily_revenue_rolling_avg",
+      "schedule": "30 * * * *",
+      "sql_model": "sql_models/03_fct_daily_revenue_rolling_avg.sql",
+      "upstream_tables": [
+        "fct_daily_revenue"
+      ],
+      "downstream_tables": [
+        "mart_revenue_trends (view, not materialized)"
+      ],
+      "last_run_status": "success",
+      "last_run_duration_seconds": 9,
+      "last_run_at": "2024-01-30T06:30:44Z"
+    }
+  ]
+}

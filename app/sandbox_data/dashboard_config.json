@@ -1,0 +1,24 @@
+{
+  "dashboard_name": "Revenue Overview",
+  "description": "Executive dashboard tracking total revenue trends by region.",
+  "owner": "analytics-team",
+  "refresh_schedule": "hourly",
+  "widgets": [
+    {
+      "widget_name": "Total Revenue by Region",
+      "chart_type": "bar",
+      "source_table": "fct_daily_revenue",
+      "dimensions": ["region"],
+      "metrics": [
+        {
+          "name": "total_revenue",
+          "aggregation": "SUM",
+          "column": "total_revenue"
+        }
+      ],
+      "filters": {
+        "date_range": "last_30_days"
+      }
+    }
+  ]
+}
