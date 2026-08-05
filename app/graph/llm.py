@@ -22,6 +22,11 @@ that one call, so a rate limit costs an investigation some accuracy on
 a single step instead of aborting the whole run. Note that backoff only
 helps with per-minute throttling; a *daily* quota won't clear no matter
 how long we wait, which is precisely why the give-up path has to exist.
+
+When a Langfuse investigation trace is open (see app/graph/tracing.py),
+each invoke also receives Langfuse's LangChain CallbackHandler so token
+usage -- and cost, when Langfuse has a price for the model -- is
+attached to the generation out of the box for both Gemini and Groq.
 """
 
 from __future__ import annotations
@@ -33,6 +38,8 @@ import time
 from typing import Any, Optional
 
 from dotenv import load_dotenv
+
+from app.graph.tracing import get_langchain_callbacks
 
 load_dotenv()
 
@@ -212,9 +219,13 @@ def invoke_structured(llm: Any, prompt: str, *, purpose: str) -> Any:
     """
     delay = INITIAL_BACKOFF_SECONDS
     last_error: Optional[BaseException] = None
+    callbacks = get_langchain_callbacks()
+    invoke_config = {"callbacks": callbacks} if callbacks else None
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
+            if invoke_config is not None:
+                return llm.invoke(prompt, config=invoke_config)
             return llm.invoke(prompt)
         except Exception as exc:
             last_error = exc

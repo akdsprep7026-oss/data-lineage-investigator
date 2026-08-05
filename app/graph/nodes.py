@@ -66,6 +66,7 @@ from app.graph.state import (
     RelevantSqlModel,
     ValidationOutcome,
 )
+from app.graph.tracing import traced_node
 from app.graph.validation import validate_hypothesis
 from app.mcp_servers.client import RETRIEVAL_SERVER, call_tool
 
@@ -285,6 +286,7 @@ def _should_run(state: InvestigationState, agent: str) -> bool:
     return agent in (state.get("agents_to_run") or [])
 
 
+@traced_node("manager")
 def manager_node(state: InvestigationState) -> dict:
     """Entry point and retry coordinator.
 
@@ -362,6 +364,7 @@ def manager_node(state: InvestigationState) -> dict:
     return update
 
 
+@traced_node("lineage_agent")
 def lineage_agent_node(state: InvestigationState) -> dict:
     """Searches the Step 4 retrieval index -- through the `retrieve`
     tool on the retrieval MCP server (see app/mcp_servers/) -- to find
@@ -439,6 +442,7 @@ def lineage_agent_node(state: InvestigationState) -> dict:
     }
 
 
+@traced_node("sql_analysis")
 def sql_analysis_node(state: InvestigationState) -> dict:
     """Asks an LLM to review each SQL model lineage_agent_node flagged
     as relevant for obvious bugs (bad joins, missing filters), and
@@ -464,6 +468,7 @@ def sql_analysis_node(state: InvestigationState) -> dict:
     return {"evidence": evidence}
 
 
+@traced_node("data_quality")
 def data_quality_node(state: InvestigationState) -> dict:
     """Runs direct row-count/duplicate-id/null-count checks against
     each table lineage_agent_node flagged as relevant, and records the
@@ -521,6 +526,7 @@ def data_quality_node(state: InvestigationState) -> dict:
     return {"evidence": evidence}
 
 
+@traced_node("etl_agent")
 def etl_agent_node(state: InvestigationState) -> dict:
     """Checks pipeline_jobs.json (see app/graph/etl_check.py) for
     failed or unusually slow runs of the jobs that read from or write
@@ -569,6 +575,7 @@ def etl_agent_node(state: InvestigationState) -> dict:
     return {"evidence": evidence}
 
 
+@traced_node("schema_agent")
 def schema_agent_node(state: InvestigationState) -> dict:
     """Compares each relevant SQL model's column references against the
     live schema of the tables it reads from (see
@@ -613,6 +620,7 @@ def schema_agent_node(state: InvestigationState) -> dict:
     return {"evidence": evidence}
 
 
+@traced_node("root_cause")
 def root_cause_node(state: InvestigationState) -> dict:
     """Takes all evidence collected so far and asks the LLM for 1-3
     ranked root-cause hypotheses.
@@ -654,6 +662,7 @@ def root_cause_node(state: InvestigationState) -> dict:
     return {"hypotheses": new_hypotheses, "top_hypothesis": top_hypothesis}
 
 
+@traced_node("validation")
 def validation_node(state: InvestigationState) -> dict:
     """Re-checks the top hypothesis against the sandbox warehouse
     directly -- re-reading the SQL models, re-reading pipeline_jobs.json,
@@ -695,6 +704,7 @@ def validation_node(state: InvestigationState) -> dict:
     return {"evidence": evidence, "validation": outcome, "validation_notes": notes}
 
 
+@traced_node("human_review")
 def human_review_node(state: InvestigationState) -> dict:
     """Terminal node. Closes the investigation as RESOLVED only when the
     top hypothesis clears RESOLVE_CONFIDENCE_THRESHOLD; otherwise marks

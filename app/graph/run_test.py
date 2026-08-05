@@ -23,6 +23,7 @@ from pathlib import Path
 from app.db.investigations import get_investigation
 from app.graph.llm import active_model_label
 from app.graph.nodes import MAX_RETRIES, RESOLVE_CONFIDENCE_THRESHOLD
+from app.graph.tracing import last_trace_url, tracing_enabled
 from app.graph.workflow import run_investigation
 from app.retrieval.ingest import ingest
 from app.sandbox_data.incidents import (
@@ -169,6 +170,21 @@ def main() -> None:
     print(f"  hypotheses:       {len(investigation.hypotheses)}")
     print(f"  final_root_cause: {'set' if investigation.final_root_cause else 'null'}")
     print(f"  workflow_state:   {json.dumps(investigation.workflow_state, indent=6)[:1200]}")
+
+    print()
+    print("LANGFUSE")
+    print("-" * 100)
+    if tracing_enabled():
+        print(
+            f"  tracing: on (session/investigation_id={final_state['investigation_id']})"
+        )
+        url = last_trace_url()
+        if url:
+            print(f"  trace:   {url}")
+        else:
+            print("  Open the Langfuse Traces view and filter by that session id.")
+    else:
+        print("  tracing: off (LANGFUSE keys missing or LANGFUSE_TRACING=false)")
 
 
 if __name__ == "__main__":

@@ -2,6 +2,9 @@ fastapi
 uvicorn[standard]
 langgraph
 langchain
+# Observability for the investigation graph (Step 9). Reads
+# LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_BASE_URL from .env.
+langfuse
 psycopg2-binary
 sqlalchemy
 chromadb

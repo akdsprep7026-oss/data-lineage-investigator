@@ -44,9 +44,11 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from app.db.investigations import create_investigation
 from app.graph import nodes
 from app.graph.nodes import MAX_RETRIES, WELL_SUPPORTED_CONFIDENCE
 from app.graph.state import InvestigationState
+from app.graph.tracing import investigation_trace
 
 # Worst case the graph visits 8 nodes per pass (manager, lineage_agent,
 # sql_analysis, data_quality, etl_agent, schema_agent, root_cause,
@@ -132,7 +134,15 @@ def run_investigation(
     Pass `investigation_id` to resume an investigation that was already
     created (e.g. via app.db.investigations.create_investigation)
     instead of starting a new one.
+
+    The investigation id is resolved before the graph starts so Langfuse
+    can use it as the session/trace id for the whole run -- including
+    the first manager pass and every retry loop -- rather than only
+    after the first node creates the Postgres row.
     """
+    if investigation_id is None:
+        investigation_id = str(create_investigation(issue_description).id)
+
     graph = build_graph()
     initial_state: InvestigationState = {
         "investigation_id": investigation_id,
@@ -152,7 +162,22 @@ def run_investigation(
         "validation_notes": [],
     }
     config = {
-        "configurable": {"thread_id": investigation_id or issue_description},
+        "configurable": {"thread_id": investigation_id},
         "recursion_limit": RECURSION_LIMIT,
     }
-    return graph.invoke(initial_state, config=config)
+
+    with investigation_trace(investigation_id, issue_description) as root:
+        final_state = graph.invoke(initial_state, config=config)
+        if root is not None:
+            root.update(
+                output={
+                    "investigation_id": final_state.get("investigation_id"),
+                    "status": final_state.get("status"),
+                    "retry_count": final_state.get("retry_count", 0),
+                    "evidence_count": len(final_state.get("evidence") or []),
+                    "hypotheses_count": len(final_state.get("hypotheses") or []),
+                    "final_root_cause": final_state.get("final_root_cause"),
+                    "validation": final_state.get("validation"),
+                }
+            )
+        return final_state

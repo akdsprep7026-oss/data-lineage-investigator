@@ -57,6 +57,16 @@ which is why the give-up path exists.
 Retrieval embeddings are chosen separately in
 `app/retrieval/embeddings.py`, since Groq has no embeddings endpoint.
 
+## Observability (Langfuse)
+
+When `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are set in `.env`,
+each `run_investigation` opens one Langfuse trace/session keyed by the
+`investigation_id`. Every graph node records its inputs, outputs, and
+duration; Gemini/Groq calls go through Langfuse's LangChain
+CallbackHandler so token usage (and cost, when Langfuse knows the model)
+show up on those generations. Set `LANGFUSE_TRACING=false` to disable
+without removing the keys.
+
 ## MCP tool servers
 
 The tools the agents use to look at the world are exposed over the Model
@@ -91,7 +101,7 @@ filter values bound as parameters.
 /app
   /api           # FastAPI application
   /db            # Database models and access (the investigations table)
-  /graph         # LangGraph workflow, nodes and evaluation harness
+  /graph         # LangGraph workflow, nodes, Langfuse tracing, evaluation harness
   /mcp_servers   # MCP tool servers + the client the nodes call them through
   /retrieval     # Retrieval / vector store logic
   /sandbox_data  # Sandbox warehouse, SQL models and incident scenarios
