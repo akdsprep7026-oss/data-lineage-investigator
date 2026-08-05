@@ -9,3 +9,4 @@ chroma_db/
 .DS_Store
 .pgdata/
 app/db/.pgdata/
+app/graph/eval_results.json

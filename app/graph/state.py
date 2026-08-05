@@ -21,7 +21,7 @@ class EvidenceEntry(TypedDict):
     """One piece of evidence gathered during the investigation. Mirrors
     the shape stored in investigations.evidence (see app/db/models.py).
     `source` names which specialist node produced it: "lineage",
-    "sql_analysis", or "data_quality"."""
+    "sql_analysis", "data_quality", "etl_agent", or "schema_agent"."""
 
     source: str
     finding: str

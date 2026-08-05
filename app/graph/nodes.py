@@ -18,9 +18,10 @@ respect:
     specialist re-running on a retry must contribute only what's new.
     Both defences the spec allows are in place: manager_node schedules
     only the agents that can close the specific gap validation found
-    (never all three again), and _select_new_evidence drops anything
-    matching a (source, finding) already recorded, so even an agent that
-    re-derives an identical result adds nothing the second time.
+    (never every specialist again), and _select_new_evidence drops
+    anything matching a (source, finding) already recorded, so even an
+    agent that re-derives an identical result adds nothing the second
+    time.
   - "the current best hypothesis" means `top_hypothesis` (whatever the
     latest pass produced), never a max over the accumulated
     `hypotheses` list -- otherwise a high-confidence hypothesis that an
@@ -38,7 +39,9 @@ from app.db.investigations import (
 )
 from app.db.models import InvestigationStatus
 from app.graph.data_quality import run_basic_checks
+from app.graph.etl_check import check_jobs_for_tables
 from app.graph.root_cause import get_root_cause_generator
+from app.graph.schema_check import find_schema_mismatches
 from app.graph.sql_review import get_sql_reviewer
 from app.graph.state import (
     EvidenceEntry,
@@ -50,10 +53,64 @@ from app.graph.state import (
 from app.graph.validation import validate_hypothesis
 from app.retrieval.retriever import retrieve
 
-# Every specialist agent the manager can dispatch. The first pass runs
-# all of them; a retry pass deliberately runs a targeted subset (see
-# RETRY_PLAN).
-AVAILABLE_AGENTS = ["lineage_agent", "sql_analysis", "data_quality"]
+# Every specialist agent the manager can dispatch, in the order they run
+# within a pass. lineage_agent always runs (every other specialist
+# depends on the relevant_sql_models/relevant_tables it produces); which
+# of the remaining four run on the first pass is decided per-issue by
+# _select_agents_for_issue below. A retry pass deliberately runs a
+# targeted subset too (see RETRY_PLAN).
+AVAILABLE_AGENTS = ["lineage_agent", "sql_analysis", "data_quality", "etl_agent", "schema_agent"]
+
+# Keyword -> agent, used by _select_agents_for_issue to decide which
+# specialists an issue description actually calls for instead of always
+# running every one of them. Deliberately loose substring matches (not
+# exact phrases) since a report can phrase the same symptom many ways;
+# false positives here just mean an extra (cheap) evidence-gathering
+# step, not a wrong conclusion, so erring toward over-matching is fine.
+AGENT_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "sql_analysis": (
+        "dropped", "drop", "missing", "undercount", "under-count",
+        "lower than expected", "duplicate", "duplicated", "counted twice",
+        "double", "inflated", "unusually high", "unexpectedly high",
+    ),
+    "data_quality": (
+        "dropped", "missing", "duplicate", "duplicated", "inflated",
+        "undercount", "unusually high", "lower than expected", "rows",
+        "counted twice",
+    ),
+    "etl_agent": (
+        "delayed", "not updated", "hasn't updated", "haven't updated",
+        "no data", "stale", "out of date", "late", "failing", "failed",
+        "job", "stopped",
+    ),
+    "schema_agent": (
+        "schema", "column", "renamed", "database error", "no such column",
+        "does not exist", "structure",
+    ),
+}
+
+
+def _select_agents_for_issue(issue_description: str) -> list[str]:
+    """Scores the issue description against AGENT_KEYWORDS to decide
+    which specialists (besides lineage_agent, which always runs) the
+    first pass should schedule -- e.g. "missing" or "lower than
+    expected" points at sql_analysis + data_quality, "failing" or "no
+    data" points at etl_agent, "database error" or "column" points at
+    schema_agent.
+
+    Falls back to running every specialist when nothing matches, so an
+    issue description that doesn't use any recognized phrasing still
+    gets a full investigation instead of an emaciated one.
+    """
+    text = issue_description.lower()
+    matched = {
+        agent
+        for agent, keywords in AGENT_KEYWORDS.items()
+        if any(keyword in text for keyword in keywords)
+    }
+    gated = [agent for agent in AVAILABLE_AGENTS if agent != "lineage_agent"]
+    selected = [agent for agent in gated if agent in matched] or gated
+    return ["lineage_agent", *selected]
 
 # How many times validation_node may send an investigation back to
 # manager_node before it has to be handed off for review regardless.
@@ -98,20 +155,20 @@ RETRY_PLAN: dict[str, RetryPlan] = {
         focus="actual row counts and coverage of the affected tables",
     ),
     "pipeline_job_unnamed": RetryPlan(
-        agent="data_quality",
-        focus="which table is actually missing rows and for which dates",
+        agent="etl_agent",
+        focus="which specific pipeline job is actually failing or late for the affected tables",
     ),
     "pipeline_wrong_job": RetryPlan(
-        agent="data_quality",
-        focus="which table is actually missing rows and for which dates",
+        agent="etl_agent",
+        focus="which specific pipeline job is actually failing or late for the affected tables",
     ),
     "schema_intact": RetryPlan(
         agent="sql_analysis",
         focus="join, filter and de-duplication logic in the transformation models",
     ),
     "schema_model_unnamed": RetryPlan(
-        agent="sql_analysis",
-        focus="which SQL model references the renamed or missing column",
+        agent="schema_agent",
+        focus="which SQL model references a column that doesn't exist in the live schema",
     ),
     "duplicates_absent": RetryPlan(
         agent="sql_analysis",
@@ -216,8 +273,10 @@ def manager_node(state: InvestigationState) -> dict:
     """Entry point and retry coordinator.
 
     On the first pass: creates a new investigation row (or resumes one
-    the caller already created), schedules every specialist agent, and
-    marks the investigation INVESTIGATING.
+    the caller already created), schedules whichever specialists
+    _select_agents_for_issue thinks the issue description actually
+    calls for (always including lineage_agent), and marks the
+    investigation INVESTIGATING.
 
     On a retry pass (validation_node routed back here because the top
     hypothesis didn't hold up): schedules a *targeted* subset instead --
@@ -273,7 +332,7 @@ def manager_node(state: InvestigationState) -> dict:
     update = {
         "investigation_id": str(investigation.id),
         "status": InvestigationStatus.INVESTIGATING.value,
-        "agents_to_run": list(AVAILABLE_AGENTS),
+        "agents_to_run": _select_agents_for_issue(state["issue_description"]),
         "agents_completed": [],
         "retry_count": 0,
         "follow_up_query": None,
@@ -395,23 +454,132 @@ def data_quality_node(state: InvestigationState) -> dict:
         except ValueError:
             continue  # not a real sandbox table (e.g. an unmaterialized mart)
 
-        has_anomaly = bool(report["duplicate_id_count"] or report["null_counts"])
+        transaction_groups = report["duplicate_transaction_groups"]
+        has_anomaly = bool(
+            report["duplicate_id_count"] or transaction_groups or report["null_counts"]
+        )
+        transaction_note = (
+            f"{transaction_groups} group(s) of rows share the same customer_id/amount/day "
+            f"under more than one distinct {report['duplicate_id_column']} (looks like the "
+            "same transaction re-emitted under a new id, which a same-id duplicate check "
+            "can't catch); "
+            if transaction_groups
+            else ""
+        )
         finding = (
             f"{table_name}: {report['row_count']} row(s); "
             f"{report['duplicate_id_column'] or 'no id column'} duplicated "
             f"{report['duplicate_id_count']} time(s); "
+            f"{transaction_note}"
             f"null counts: {report['null_counts'] or 'none'}"
         )
+        # A same-id duplicate is at least suspicious; a same-transaction-
+        # different-id match is a much more specific, harder-to-fake
+        # signal (it takes three columns lining up at once), so it's
+        # worth more confidence than the plain anomaly floor below.
+        confidence = 0.3
+        if transaction_groups:
+            confidence = 0.75
+        elif has_anomaly:
+            confidence = 0.6
         candidates.append(
-            EvidenceEntry(
-                source="data_quality",
-                finding=finding,
-                confidence=0.6 if has_anomaly else 0.3,
-            )
+            EvidenceEntry(source="data_quality", finding=finding, confidence=confidence)
         )
 
     evidence = _select_new_evidence(state, candidates)
     _persist_evidence(state, "data_quality", evidence)
+    return {"evidence": evidence}
+
+
+def etl_agent_node(state: InvestigationState) -> dict:
+    """Checks pipeline_jobs.json (see app/graph/etl_check.py) for
+    failed or unusually slow runs of the jobs that read from or write
+    to the tables lineage_agent_node flagged as relevant, and records
+    each job's health as "etl_agent" evidence.
+
+    This is the ETL-metadata counterpart to data_quality_node: instead
+    of inferring a pipeline problem from what's missing or wrong in the
+    data, it looks at the job status directly -- catching a job that
+    has simply stopped succeeding (e.g. incident 2's stale pipeline)
+    without needing to reason about its downstream effects first.
+    """
+    if not _should_run(state, "etl_agent"):
+        return {}
+
+    _record_transition(state, "etl_agent")
+    reports = check_jobs_for_tables(state.get("relevant_tables") or [])
+    candidates: list[EvidenceEntry] = []
+    for report in reports:
+        if report["status"] == "healthy":
+            finding = (
+                f"{report['job_name']}: last run succeeded "
+                f"({report['last_run_duration_seconds']}s) at {report['last_run_at']}."
+            )
+            confidence = 0.2
+        elif report["status"] == "late":
+            finding = (
+                f"{report['job_name']}: last run succeeded but took "
+                f"{report['last_run_duration_seconds']}s, unusually slow for this job."
+            )
+            confidence = 0.4
+        else:
+            finding = (
+                f"{report['job_name']}: last_run_status='{report['last_run_status']}' "
+                f"as of {report['last_run_at']}"
+                + (f" ({report['error_message']})" if report["error_message"] else "")
+                + f". Feeds: {', '.join(report['downstream_tables']) or 'none'}."
+            )
+            confidence = 0.75
+        candidates.append(
+            EvidenceEntry(source="etl_agent", finding=finding, confidence=confidence)
+        )
+
+    evidence = _select_new_evidence(state, candidates)
+    _persist_evidence(state, "etl_agent", evidence)
+    return {"evidence": evidence}
+
+
+def schema_agent_node(state: InvestigationState) -> dict:
+    """Compares each relevant SQL model's column references against the
+    live schema of the tables it reads from (see
+    app/graph/schema_check.py), and records any mismatch as
+    "schema_agent" evidence.
+
+    This is a static, no-LLM, no-execution check -- it complements
+    sql_analysis_node's LLM review of the transformation *logic* and
+    validation_node's direct re-execution of the model (which only runs
+    once a hypothesis already exists to check) by catching a breaking
+    upstream rename or drop (e.g. incident 3) as part of ordinary
+    evidence gathering, before any hypothesis has been proposed.
+    """
+    if not _should_run(state, "schema_agent"):
+        return {}
+
+    _record_transition(state, "schema_agent")
+    candidates: list[EvidenceEntry] = []
+    for model in state.get("relevant_sql_models") or []:
+        mismatches = find_schema_mismatches(model["sql_text"])
+        if mismatches:
+            described = "; ".join(
+                f"{m.table}.{m.column} (referenced as {m.referenced_as})" for m in mismatches
+            )
+            finding = (
+                f"[{model['file_path']}] references column(s) that don't exist in "
+                f"the live schema: {described}."
+            )
+            confidence = 0.8
+        else:
+            finding = (
+                f"[{model['file_path']}] every column it references exists in the "
+                "live schema of the table(s) it reads from."
+            )
+            confidence = 0.2
+        candidates.append(
+            EvidenceEntry(source="schema_agent", finding=finding, confidence=confidence)
+        )
+
+    evidence = _select_new_evidence(state, candidates)
+    _persist_evidence(state, "schema_agent", evidence)
     return {"evidence": evidence}
 
 

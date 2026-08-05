@@ -64,8 +64,11 @@ CLAIM_KEYWORDS: dict[ClaimKind, tuple[str, ...]] = {
         "rename",
         "no such column",
         "missing column",
+        "column is missing",
         "column name",
         "does not exist",
+        "doesn't exist",
+        "no longer exists",
         "order_created_at",
     ),
     "stale_pipeline": (

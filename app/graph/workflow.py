@@ -4,22 +4,32 @@ As of Step 6 the graph is cyclic. Evidence gathering and root-cause
 analysis are followed by a validation step that re-checks the top
 hypothesis against the sandbox warehouse directly; a hypothesis that
 doesn't hold up sends the investigation back to the manager for another,
-narrower round of evidence gathering::
+narrower round of evidence gathering. As of Step 7 there are five
+specialist agents instead of three::
 
     START -> manager -> lineage_agent -> sql_analysis -> data_quality
+           -> etl_agent -> schema_agent
            -> root_cause -> validation --(not supported, retries left)--> manager
                                        \\--(supported, or retries spent)--> human_review -> END
 
-Node order within a pass is unchanged from the linear Step 5 graph:
-lineage_agent runs first because sql_analysis and data_quality both
-depend on the models/tables it finds, and root_cause runs last because
-it needs everything the other three gathered.
+Node order within a pass: lineage_agent always runs first because every
+other specialist depends on the models/tables it finds; the four
+specialists in between don't depend on each other (each reads only what
+lineage_agent produced), so their relative order doesn't affect the
+result -- they just run one after another rather than in parallel, for
+the same reason the Step 5 graph did: it keeps the state updates simple
+(no merge logic needed between concurrent branches) and the execution
+trace linear and easy to follow. root_cause runs last because it needs
+everything the other four gathered.
 
-What differs on a retry pass is *which* of those nodes actually do
-anything: manager_node schedules a targeted subset of specialists aimed
-at the specific gap validation reported, and the unscheduled ones fall
-through as no-ops (see app/graph/nodes.py). The graph shape stays the
-same on every pass; only the work inside it narrows.
+Which specialists actually do anything on a given pass varies:
+manager_node's _select_agents_for_issue (see app/graph/nodes.py) scores
+the issue description against keywords to schedule only the specialists
+relevant to the kind of problem being reported on the first pass, and a
+retry pass schedules a further-targeted subset aimed at the specific gap
+validation reported. Whichever specialists aren't scheduled a given pass
+fall through as no-ops. The graph shape stays the same on every pass;
+only the work inside it narrows.
 
 See app/graph/nodes.py for what each node does, app/graph/validation.py
 for the direct re-checks behind validation_node, and app/graph/state.py
@@ -38,9 +48,11 @@ from app.graph import nodes
 from app.graph.nodes import MAX_RETRIES, WELL_SUPPORTED_CONFIDENCE
 from app.graph.state import InvestigationState
 
-# Worst case the graph visits 6 nodes per pass across 1 initial pass plus
-# MAX_RETRIES retries, then human_review. The default limit of 25 would
-# only just accommodate that, so it's raised to leave headroom if
+# Worst case the graph visits 8 nodes per pass (manager, lineage_agent,
+# sql_analysis, data_quality, etl_agent, schema_agent, root_cause,
+# validation) across 1 initial pass plus MAX_RETRIES retries, then
+# human_review -- 25 with today's MAX_RETRIES=2. The default limit of 25
+# would only just accommodate that, so it's raised to leave headroom if
 # MAX_RETRIES is ever increased.
 RECURSION_LIMIT = 50
 
@@ -84,6 +96,8 @@ def build_graph() -> CompiledStateGraph:
     graph.add_node("lineage_agent", nodes.lineage_agent_node)
     graph.add_node("sql_analysis", nodes.sql_analysis_node)
     graph.add_node("data_quality", nodes.data_quality_node)
+    graph.add_node("etl_agent", nodes.etl_agent_node)
+    graph.add_node("schema_agent", nodes.schema_agent_node)
     graph.add_node("root_cause", nodes.root_cause_node)
     graph.add_node("validation", nodes.validation_node)
     graph.add_node("human_review", nodes.human_review_node)
@@ -92,7 +106,9 @@ def build_graph() -> CompiledStateGraph:
     graph.add_edge("manager", "lineage_agent")
     graph.add_edge("lineage_agent", "sql_analysis")
     graph.add_edge("sql_analysis", "data_quality")
-    graph.add_edge("data_quality", "root_cause")
+    graph.add_edge("data_quality", "etl_agent")
+    graph.add_edge("etl_agent", "schema_agent")
+    graph.add_edge("schema_agent", "root_cause")
     graph.add_edge("root_cause", "validation")
     graph.add_conditional_edges(
         "validation",

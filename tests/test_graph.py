@@ -21,18 +21,22 @@ from app.db.models import InvestigationStatus
 from app.graph.nodes import (
     MAX_RETRIES,
     RESOLVE_CONFIDENCE_THRESHOLD,
+    _select_agents_for_issue,
     _select_new_evidence,
     data_quality_node,
+    etl_agent_node,
     human_review_node,
     lineage_agent_node,
     manager_node,
+    schema_agent_node,
     sql_analysis_node,
 )
 from app.graph.root_cause import MAX_HYPOTHESES
 from app.graph.workflow import route_after_validation, run_investigation
 from app.retrieval.ingest import ingest
+from app.sandbox_data.incidents import common, incident_02_stale_pipeline, incident_03_schema_change
 
-ALL_AGENTS = ["lineage_agent", "sql_analysis", "data_quality"]
+ALL_AGENTS = ["lineage_agent", "sql_analysis", "data_quality", "etl_agent", "schema_agent"]
 
 
 def _hypothesis(confidence: float, description: str = "some claim") -> dict:
@@ -150,8 +154,8 @@ def test_manager_schedules_every_agent_on_the_first_pass():
 
 def test_manager_targets_a_subset_of_agents_on_retry():
     """A retry should bring in a different kind of evidence, not re-run
-    everything -- re-running all three would mostly re-derive findings
-    already on file."""
+    everything -- re-running every specialist would mostly re-derive
+    findings already on file."""
     investigation = create_investigation("retry targeting")
     result = manager_node(
         {
@@ -176,6 +180,69 @@ def test_manager_targets_a_subset_of_agents_on_retry():
     assert result["validation"] is None
 
 
+def test_manager_retargets_to_etl_agent_when_the_pipeline_gap_is_job_specific():
+    """A gap that means "which job is at fault" should route to
+    etl_agent (which reads job metadata directly), not data_quality."""
+    investigation = create_investigation("retry targeting etl")
+    result = manager_node(
+        {
+            "investigation_id": str(investigation.id),
+            "issue_description": "Dashboard is stale",
+            "agents_to_run": ALL_AGENTS,
+            "agents_completed": [],
+            "retry_count": 0,
+            "validation": _validation(confirmed=False, gap="pipeline_job_unnamed"),
+        }
+    )
+
+    assert result["agents_to_run"] == ["lineage_agent", "etl_agent"]
+
+
+def test_manager_retargets_to_schema_agent_when_the_schema_gap_is_model_unnamed():
+    """A gap that means "which model references the missing column"
+    should route to schema_agent (which checks column references
+    directly), not sql_analysis."""
+    investigation = create_investigation("retry targeting schema")
+    result = manager_node(
+        {
+            "investigation_id": str(investigation.id),
+            "issue_description": "Job is failing with a database error",
+            "agents_to_run": ALL_AGENTS,
+            "agents_completed": [],
+            "retry_count": 0,
+            "validation": _validation(confirmed=False, gap="schema_model_unnamed"),
+        }
+    )
+
+    assert result["agents_to_run"] == ["lineage_agent", "schema_agent"]
+
+
+def test_select_agents_for_issue_prioritizes_lineage_sql_and_data_quality_for_missing_rows():
+    selected = _select_agents_for_issue(
+        "Revenue looks lower than expected -- some rows seem to be missing."
+    )
+    assert selected == ["lineage_agent", "sql_analysis", "data_quality"]
+
+
+def test_select_agents_for_issue_prioritizes_etl_agent_for_staleness_language():
+    selected = _select_agents_for_issue(
+        "The dashboard shows no data for the last two days; the job seems delayed."
+    )
+    assert selected == ["lineage_agent", "etl_agent"]
+
+
+def test_select_agents_for_issue_prioritizes_schema_agent_for_schema_language():
+    selected = _select_agents_for_issue(
+        "The job is failing on every run with a database error referencing a renamed column."
+    )
+    assert set(selected) == {"lineage_agent", "etl_agent", "schema_agent"}
+
+
+def test_select_agents_for_issue_falls_back_to_everything_when_nothing_matches():
+    selected = _select_agents_for_issue("Something seems off with the numbers.")
+    assert selected == ALL_AGENTS
+
+
 def test_specialist_nodes_no_op_when_this_pass_did_not_schedule_them():
     state = {
         "investigation_id": None,
@@ -188,6 +255,8 @@ def test_specialist_nodes_no_op_when_this_pass_did_not_schedule_them():
 
     assert sql_analysis_node(state) == {}
     assert data_quality_node(state) == {}
+    assert etl_agent_node(state) == {}
+    assert schema_agent_node(state) == {}
 
 
 def test_select_new_evidence_drops_entries_already_recorded():
@@ -359,3 +428,126 @@ def test_data_quality_node_checks_a_real_table():
     assert len(result["evidence"]) == 1
     assert result["evidence"][0]["source"] == "data_quality"
     assert "raw_orders" in result["evidence"][0]["finding"]
+
+
+def test_data_quality_node_flags_duplicate_transactions_under_new_ids():
+    """Incident 4's scenario: ~15 completed orders are re-emitted with
+    brand-new order_ids for what's really the same transaction, so a
+    same-id duplicate count alone (0 in this case, each new id appears
+    exactly once) would miss it entirely. The customer/amount/day check
+    should catch it instead."""
+    from app.sandbox_data.incidents import incident_04_duplicate_rows
+
+    incident_04_duplicate_rows.apply()
+    try:
+        investigation = create_investigation("test issue")
+        state = {
+            "investigation_id": str(investigation.id),
+            "issue_description": "test issue",
+            "agents_to_run": ALL_AGENTS,
+            "evidence": [],
+            "relevant_tables": ["raw_orders"],
+        }
+        result = data_quality_node(state)
+
+        assert len(result["evidence"]) == 1
+        finding = result["evidence"][0]["finding"]
+        assert "same transaction re-emitted under a new id" in finding
+        assert result["evidence"][0]["confidence"] >= 0.75
+    finally:
+        common.reset_to_clean_baseline()
+
+
+def test_etl_agent_node_flags_a_failed_job():
+    """Incident 2's scenario: build_fct_daily_revenue has been marked
+    failed in pipeline_jobs.json. etl_agent_node should surface that
+    directly, with high confidence, rather than needing to infer it from
+    the data."""
+    incident_02_stale_pipeline.apply()
+    try:
+        investigation = create_investigation("test issue")
+        state = {
+            "investigation_id": str(investigation.id),
+            "issue_description": "test issue",
+            "agents_to_run": ALL_AGENTS,
+            "evidence": [],
+            "relevant_tables": ["fct_daily_revenue"],
+        }
+        result = etl_agent_node(state)
+
+        assert result["evidence"]
+        assert all(item["source"] == "etl_agent" for item in result["evidence"])
+        failed = [item for item in result["evidence"] if "build_fct_daily_revenue" in item["finding"]]
+        assert failed
+        assert "failed" in failed[0]["finding"]
+        assert failed[0]["confidence"] > 0.5
+    finally:
+        common.reset_to_clean_baseline()
+
+
+def test_etl_agent_node_reports_healthy_jobs_with_low_confidence():
+    investigation = create_investigation("test issue")
+    state = {
+        "investigation_id": str(investigation.id),
+        "issue_description": "test issue",
+        "agents_to_run": ALL_AGENTS,
+        "evidence": [],
+        "relevant_tables": ["fct_daily_revenue"],
+    }
+    result = etl_agent_node(state)
+
+    assert result["evidence"]
+    assert all(item["confidence"] < 0.5 for item in result["evidence"])
+
+
+def test_schema_agent_node_flags_a_column_that_no_longer_exists():
+    """Incident 3's scenario: raw_orders.created_at was renamed to
+    order_created_at, but the SQL model still references o.created_at.
+    schema_agent_node should catch that by comparing against the live
+    schema directly, without needing to execute anything."""
+    incident_03_schema_change.apply()
+    try:
+        investigation = create_investigation("test issue")
+        state = {
+            "investigation_id": str(investigation.id),
+            "issue_description": "test issue",
+            "agents_to_run": ALL_AGENTS,
+            "evidence": [],
+            "relevant_sql_models": [
+                {
+                    "file_path": "app/sandbox_data/sql_models/01_stg_orders_cleaned.sql",
+                    "table_name": "stg_orders_cleaned",
+                    "sql_text": common.CLEAN_STG_ORDERS_CLEANED_SQL,
+                }
+            ],
+        }
+        result = schema_agent_node(state)
+
+        assert len(result["evidence"]) == 1
+        assert result["evidence"][0]["source"] == "schema_agent"
+        assert "created_at" in result["evidence"][0]["finding"]
+        assert result["evidence"][0]["confidence"] > 0.5
+    finally:
+        common.reset_to_clean_baseline()
+
+
+def test_schema_agent_node_reports_no_mismatch_when_columns_line_up():
+    investigation = create_investigation("test issue")
+    state = {
+        "investigation_id": str(investigation.id),
+        "issue_description": "test issue",
+        "agents_to_run": ALL_AGENTS,
+        "evidence": [],
+        "relevant_sql_models": [
+            {
+                "file_path": "app/sandbox_data/sql_models/01_stg_orders_cleaned.sql",
+                "table_name": "stg_orders_cleaned",
+                "sql_text": common.CLEAN_STG_ORDERS_CLEANED_SQL,
+            }
+        ],
+    }
+    result = schema_agent_node(state)
+
+    assert len(result["evidence"]) == 1
+    assert result["evidence"][0]["source"] == "schema_agent"
+    assert result["evidence"][0]["confidence"] < 0.5
