@@ -197,3 +197,8 @@ pytest
 - **Incident #4 is a partial match.** The system correctly surfaces the symptom (same transaction re-emitted under a new `order_id`) and conservatively lands in `needs_human_review` at 0.80 confidence, but the LLM's stated mechanism is wrong — it blames window-function row selection instead of the real gap (dedup only partitions by `order_id`, so a brand-new id bypasses it entirely). This is an LLM reasoning miss on the evidence, not a missing specialist or broken validation loop.
 - **Gemini free-tier quota is unstable for this workload** (daily `generate_content` cap of 20). The official `eval_report.md` was therefore run against Groq. Prefer `LLM_PROVIDER=groq` for iterative development; use Gemini when you specifically want that provider and have quota left.
 - **Sandbox, not production.** The warehouse, SQL models, pipeline job log, and incidents are a simulated local environment designed for reproducible demos and evaluation — not a connection to a real production data platform.
+
+
+Demo of UI:-
+<img width="1167" height="531" alt="image" src="https://github.com/user-attachments/assets/b0871a95-8a49-4f7f-a959-5d493f1a65aa" />
+
