@@ -17,12 +17,13 @@ additive reducer across passes.
 Runs all four incidents by default (each takes a few minutes against a
 real LLM), and resets the sandbox to its clean baseline afterwards.
 
-Pass --offline to clear GOOGLE_API_KEY and run against the deterministic
-heuristic fallbacks instead. That costs nothing and doesn't depend on
-API quota, and it exercises the loop harder than the real model does:
-the heuristics can't produce a hypothesis specific enough for the direct
-re-check to confirm, so every incident runs the retry budget down and
-ends up flagged for human review.
+Pass --offline to clear every configured LLM API key (GOOGLE_API_KEY and
+GROQ_API_KEY — see API_KEY_ENV_VARS in app/graph/llm.py) and run against
+the deterministic heuristic fallbacks instead. That costs nothing and
+doesn't depend on API quota, and it exercises the loop harder than the
+real model does: the heuristics can't produce a hypothesis specific
+enough for the direct re-check to confirm, so every incident runs the
+retry budget down and ends up flagged for human review.
 
 Usage:
     python -m app.graph.verify_step6

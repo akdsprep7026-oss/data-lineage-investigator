@@ -1,6 +1,7 @@
 """Root-cause hypothesis synthesis from all evidence gathered by the
 specialist nodes (lineage_agent_node, sql_analysis_node,
-data_quality_node), used by root_cause_node.
+data_quality_node, etl_agent_node, schema_agent_node), used by
+root_cause_node.
 
 Uses whichever provider app/graph/llm.py resolves (Gemini by default,
 Groq when LLM_PROVIDER=groq) to reason over the evidence and produce

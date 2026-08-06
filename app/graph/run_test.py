@@ -101,8 +101,8 @@ def main() -> None:
 
     print(
         "Running the cyclic investigation graph (manager -> lineage_agent -> "
-        "sql_analysis -> data_quality -> root_cause -> validation -> "
-        "{manager | human_review})...\n"
+        "sql_analysis -> data_quality -> etl_agent -> schema_agent -> "
+        "root_cause -> validation -> {manager | human_review})...\n"
     )
     final_state = run_investigation(issue_description)
 
