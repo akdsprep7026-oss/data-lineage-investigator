@@ -32,6 +32,16 @@ Data Lineage Investigator is an AI-powered agent system that traces the origin, 
 
 5. Check the health endpoint at [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health).
 
+6. Run the frontend (separate terminal):
+
+   ```bash
+   cd frontend
+   npm install
+   npm run dev
+   ```
+
+   Open [http://127.0.0.1:5173](http://127.0.0.1:5173). Vite proxies `/investigations` to the API.
+
 ## LLM providers
 
 The `sql_analysis` and `root_cause` steps call an LLM. Which one is set
@@ -99,12 +109,13 @@ filter values bound as parameters.
 
 ```
 /app
-  /api           # FastAPI application
+  /api           # FastAPI application (health + investigations API)
   /db            # Database models and access (the investigations table)
   /graph         # LangGraph workflow, nodes, Langfuse tracing, evaluation harness
   /mcp_servers   # MCP tool servers + the client the nodes call them through
   /retrieval     # Retrieval / vector store logic
   /sandbox_data  # Sandbox warehouse, SQL models and incident scenarios
+/frontend        # Vite + React + TypeScript UI (Submit / Detail / History)
 /alembic         # Database migrations
 /tests           # Test suite
 ```

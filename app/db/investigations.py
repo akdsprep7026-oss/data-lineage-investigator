@@ -14,6 +14,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, Optional
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.base import get_session
@@ -62,6 +63,23 @@ def get_investigation(
     session = session or get_session()
     try:
         return session.get(Investigation, _coerce_uuid(investigation_id))
+    finally:
+        if owns_session:
+            session.close()
+
+
+def list_investigations(
+    session: Optional[Session] = None,
+) -> list[Investigation]:
+    """Returns every investigation, newest first -- the History view."""
+    owns_session = session is None
+    session = session or get_session()
+    try:
+        return list(
+            session.scalars(
+                select(Investigation).order_by(Investigation.created_at.desc())
+            ).all()
+        )
     finally:
         if owns_session:
             session.close()
