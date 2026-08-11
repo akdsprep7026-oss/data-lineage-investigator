@@ -62,10 +62,7 @@ def _llm_review_sql(issue_description: str, table_name: str, sql_text: str) -> S
     )
     try:
         result: _SqlReviewSchema = invoke_structured(
-            llm,
-            prompt,
-            purpose=f"SQL review of {table_name}",
-            schema=_SqlReviewSchema,
+            llm, prompt, purpose=f"SQL review of {table_name}"
         )
     except LLMUnavailable as exc:
         # One unreachable model call shouldn't sink the investigation --

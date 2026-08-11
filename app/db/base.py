@@ -289,12 +289,7 @@ def get_database_url() -> str:
 def get_engine() -> Engine:
     global _engine
     if _engine is None:
-        # pool_pre_ping: before handing out a pooled connection, emit a
-        # cheap SELECT 1 (or dialect equivalent) and replace the
-        # connection if it is dead. Needed for Neon/Render where idle
-        # SSL sessions are closed server-side while the process-global
-        # engine still holds them in the default QueuePool.
-        _engine = create_engine(get_database_url(), pool_pre_ping=True)
+        _engine = create_engine(get_database_url())
     return _engine
 
 

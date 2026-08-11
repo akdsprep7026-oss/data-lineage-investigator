@@ -1,5 +1,4 @@
-"""Tests for provider selection, retry-with-backoff, and Gemini→Groq
-failover in app/graph/llm.py.
+"""Tests for provider selection and retry-with-backoff in app/graph/llm.py.
 
 No network calls: the "model" here is a stub that raises whatever we
 tell it to, and sleeping is patched out so the backoff schedule can be
@@ -8,10 +7,7 @@ asserted without the tests actually waiting for it.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
-from pydantic import BaseModel, Field
 
 from app.graph import llm as llm_module
 from app.graph.llm import (
@@ -31,15 +27,11 @@ class StubLLM:
         self.result = result
         self.calls = 0
 
-    def invoke(self, prompt, config=None):
+    def invoke(self, prompt):
         self.calls += 1
         if self.errors:
             raise self.errors.pop(0)
         return self.result
-
-
-class _TinySchema(BaseModel):
-    value: str = Field(description="a value")
 
 
 @pytest.fixture
@@ -51,15 +43,6 @@ def no_sleeping(monkeypatch):
 
 
 def rate_limited(message="429 RESOURCE_EXHAUSTED: rate limit exceeded"):
-    return RuntimeError(message)
-
-
-def quota_exhausted(
-    message=(
-        "429 RESOURCE_EXHAUSTED Quota exceeded for: "
-        "generativelanguage.googleapis.com/generate_content_free_tier_requests"
-    ),
-):
     return RuntimeError(message)
 
 
@@ -149,16 +132,6 @@ def test_exhausted_retries_raise_llm_unavailable_for_the_caller_to_absorb(no_sle
     assert len(no_sleeping) == MAX_ATTEMPTS - 1
 
 
-def test_hard_quota_exhaustion_fails_fast_without_retries(no_sleeping):
-    stub = StubLLM(errors=[quota_exhausted()])
-
-    with pytest.raises(LLMUnavailable, match="quota exhausted"):
-        invoke_structured(stub, "prompt", purpose="test")
-
-    assert stub.calls == 1
-    assert no_sleeping == []
-
-
 def test_a_bad_api_key_is_not_retried(no_sleeping):
     stub = StubLLM(errors=[RuntimeError("401 UNAUTHENTICATED: invalid api key")])
 
@@ -181,175 +154,6 @@ def test_an_unexpected_error_propagates_instead_of_being_absorbed(no_sleeping):
     assert no_sleeping == []
 
 
-def test_gemini_success_does_not_call_groq(monkeypatch, no_sleeping):
-    monkeypatch.setenv("LLM_PROVIDER", "gemini")
-    monkeypatch.setenv("GOOGLE_API_KEY", "real-gemini-key")
-    monkeypatch.setenv("GROQ_API_KEY", "gsk_real_groq_key")
-
-    gemini = StubLLM(result=SimpleNamespace(value="from-gemini"))
-    groq = StubLLM(result=SimpleNamespace(value="from-groq"))
-
-    result = invoke_structured(
-        gemini,
-        "prompt",
-        purpose="root-cause synthesis",
-        schema=_TinySchema,
-        secondary_llm=groq,
-    )
-
-    assert result.value == "from-gemini"
-    assert gemini.calls == 1
-    assert groq.calls == 0
-
-
-def test_gemini_transient_recovery_does_not_call_groq(monkeypatch, no_sleeping):
-    monkeypatch.setenv("LLM_PROVIDER", "gemini")
-    monkeypatch.setenv("GOOGLE_API_KEY", "real-gemini-key")
-    monkeypatch.setenv("GROQ_API_KEY", "gsk_real_groq_key")
-
-    gemini = StubLLM(errors=[rate_limited()], result=SimpleNamespace(value="recovered"))
-    groq = StubLLM(result=SimpleNamespace(value="from-groq"))
-
-    result = invoke_structured(
-        gemini,
-        "prompt",
-        purpose="root-cause synthesis",
-        schema=_TinySchema,
-        secondary_llm=groq,
-    )
-
-    assert result.value == "recovered"
-    assert gemini.calls == 2
-    assert groq.calls == 0
-
-
-def test_gemini_quota_exhaustion_fails_over_to_groq(monkeypatch, no_sleeping):
-    monkeypatch.setenv("LLM_PROVIDER", "gemini")
-    monkeypatch.setenv("GOOGLE_API_KEY", "real-gemini-key")
-    monkeypatch.setenv("GROQ_API_KEY", "gsk_real_groq_key")
-
-    gemini = StubLLM(errors=[quota_exhausted()])
-    groq = StubLLM(result=SimpleNamespace(value="from-groq"))
-
-    result = invoke_structured(
-        gemini,
-        "prompt",
-        purpose="root-cause synthesis",
-        schema=_TinySchema,
-        secondary_llm=groq,
-    )
-
-    assert result.value == "from-groq"
-    assert gemini.calls == 1
-    assert groq.calls == 1
-    assert no_sleeping == []
-
-
-def test_gemini_and_groq_unavailable_raises_llm_unavailable(monkeypatch, no_sleeping):
-    monkeypatch.setenv("LLM_PROVIDER", "gemini")
-    monkeypatch.setenv("GOOGLE_API_KEY", "real-gemini-key")
-    monkeypatch.setenv("GROQ_API_KEY", "gsk_real_groq_key")
-
-    gemini = StubLLM(errors=[quota_exhausted()])
-    groq = StubLLM(errors=[rate_limited() for _ in range(MAX_ATTEMPTS)])
-
-    with pytest.raises(LLMUnavailable):
-        invoke_structured(
-            gemini,
-            "prompt",
-            purpose="root-cause synthesis",
-            schema=_TinySchema,
-            secondary_llm=groq,
-        )
-
-    assert gemini.calls == 1
-    assert groq.calls == MAX_ATTEMPTS
-
-
-def test_manual_groq_mode_never_calls_gemini(monkeypatch, no_sleeping):
-    monkeypatch.setenv("LLM_PROVIDER", "groq")
-    monkeypatch.setenv("GROQ_API_KEY", "gsk_real_groq_key")
-    monkeypatch.setenv("GOOGLE_API_KEY", "real-gemini-key")
-
-    groq = StubLLM(result=SimpleNamespace(value="from-groq"))
-    gemini = StubLLM(result=SimpleNamespace(value="from-gemini"))
-
-    result = invoke_structured(
-        groq,
-        "prompt",
-        purpose="root-cause synthesis",
-        schema=_TinySchema,
-        secondary_llm=gemini,
-    )
-
-    assert result.value == "from-groq"
-    assert groq.calls == 1
-    assert gemini.calls == 0
-
-
-def test_gemini_failure_without_groq_key_raises_without_secondary(
-    monkeypatch, no_sleeping
-):
-    monkeypatch.setenv("LLM_PROVIDER", "gemini")
-    monkeypatch.setenv("GOOGLE_API_KEY", "real-gemini-key")
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
-
-    gemini = StubLLM(errors=[quota_exhausted()])
-
-    with pytest.raises(LLMUnavailable):
-        invoke_structured(
-            gemini,
-            "prompt",
-            purpose="root-cause synthesis",
-            schema=_TinySchema,
-        )
-
-    assert gemini.calls == 1
-
-
-def test_gemini_auth_failure_fails_over_to_groq(monkeypatch, no_sleeping):
-    monkeypatch.setenv("LLM_PROVIDER", "gemini")
-    monkeypatch.setenv("GOOGLE_API_KEY", "real-gemini-key")
-    monkeypatch.setenv("GROQ_API_KEY", "gsk_real_groq_key")
-
-    gemini = StubLLM(errors=[RuntimeError("401 UNAUTHENTICATED: invalid api key")])
-    groq = StubLLM(result=SimpleNamespace(value="from-groq"))
-
-    result = invoke_structured(
-        gemini,
-        "prompt",
-        purpose="root-cause synthesis",
-        schema=_TinySchema,
-        secondary_llm=groq,
-    )
-
-    assert result.value == "from-groq"
-    assert gemini.calls == 1
-    assert groq.calls == 1
-    assert no_sleeping == []
-
-
-def test_groq_fallback_preserves_structured_schema(monkeypatch, no_sleeping):
-    monkeypatch.setenv("LLM_PROVIDER", "gemini")
-    monkeypatch.setenv("GOOGLE_API_KEY", "real-gemini-key")
-    monkeypatch.setenv("GROQ_API_KEY", "gsk_real_groq_key")
-
-    structured = _TinySchema(value="structured-ok")
-    gemini = StubLLM(errors=[quota_exhausted()])
-    groq = StubLLM(result=structured)
-
-    result = invoke_structured(
-        gemini,
-        "prompt",
-        purpose="root-cause synthesis",
-        schema=_TinySchema,
-        secondary_llm=groq,
-    )
-
-    assert isinstance(result, _TinySchema)
-    assert result.value == "structured-ok"
-
-
 def test_sql_review_degrades_to_its_heuristic_when_the_model_is_unreachable(
     monkeypatch, no_sleeping
 ):
@@ -358,7 +162,6 @@ def test_sql_review_degrades_to_its_heuristic_when_the_model_is_unreachable(
     from app.graph import sql_review
 
     monkeypatch.setenv("GOOGLE_API_KEY", "real-gemini-key")
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
     monkeypatch.setattr(
         sql_review,
         "build_structured_llm",
@@ -384,7 +187,6 @@ def test_root_cause_degrades_to_its_heuristic_when_the_model_is_unreachable(
     from app.graph import root_cause
 
     monkeypatch.setenv("GOOGLE_API_KEY", "real-gemini-key")
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
     monkeypatch.setattr(
         root_cause,
         "build_structured_llm",
@@ -402,131 +204,3 @@ def test_root_cause_degrades_to_its_heuristic_when_the_model_is_unreachable(
 
     assert hypotheses
     assert all(0.0 <= item["confidence_score"] <= 1.0 for item in hypotheses)
-
-
-def test_root_cause_uses_heuristic_when_both_providers_unavailable(
-    monkeypatch, no_sleeping
-):
-    from app.graph import root_cause
-
-    monkeypatch.setenv("LLM_PROVIDER", "gemini")
-    monkeypatch.setenv("GOOGLE_API_KEY", "real-gemini-key")
-    monkeypatch.setenv("GROQ_API_KEY", "gsk_real_groq_key")
-    monkeypatch.setattr(
-        root_cause,
-        "build_structured_llm",
-        lambda schema: StubLLM(errors=[quota_exhausted()]),
-    )
-    monkeypatch.setattr(
-        llm_module,
-        "build_structured_llm_for_provider",
-        lambda provider, schema: StubLLM(
-            errors=[rate_limited() for _ in range(MAX_ATTEMPTS)]
-        ),
-    )
-
-    generate = root_cause.get_root_cause_generator()
-    hypotheses = generate(
-        "revenue is undercounted",
-        [{"source": "lineage", "finding": "stg_orders_cleaned model", "confidence": 0.8}],
-        [],
-    )
-
-    assert hypotheses
-    assert hypotheses[0]["description"].startswith("Possibly related to")
-
-
-def test_production_failover_constructs_groq_via_build_structured_llm_for_provider(
-    monkeypatch, no_sleeping
-):
-    """Gemini failure must go through the real secondary-construction path,
-    not only the secondary_llm= test hook."""
-    monkeypatch.setenv("LLM_PROVIDER", "gemini")
-    monkeypatch.setenv("GOOGLE_API_KEY", "real-gemini-key")
-    monkeypatch.setenv("GROQ_API_KEY", "gsk_real_groq_key")
-
-    gemini = StubLLM(errors=[quota_exhausted()])
-    groq = StubLLM(result=SimpleNamespace(value="from-constructed-groq"))
-    construction_calls: list[tuple[str, type]] = []
-
-    def fake_build(provider, schema):
-        construction_calls.append((provider, schema))
-        assert provider == "groq"
-        assert schema is _TinySchema
-        return groq
-
-    monkeypatch.setattr(
-        llm_module, "build_structured_llm_for_provider", fake_build
-    )
-
-    result = invoke_structured(
-        gemini,
-        "prompt",
-        purpose="root-cause synthesis",
-        schema=_TinySchema,
-    )
-
-    assert result.value == "from-constructed-groq"
-    assert gemini.calls == 1
-    assert groq.calls == 1
-    assert construction_calls == [("groq", _TinySchema)]
-    assert no_sleeping == []
-
-
-def test_manual_groq_failure_does_not_fall_back_to_gemini(monkeypatch, no_sleeping):
-    """LLM_PROVIDER=groq means Groq-only, even when a Gemini key exists."""
-    monkeypatch.setenv("LLM_PROVIDER", "groq")
-    monkeypatch.setenv("GROQ_API_KEY", "gsk_real_groq_key")
-    monkeypatch.setenv("GOOGLE_API_KEY", "real-gemini-key")
-
-    groq = StubLLM(errors=[rate_limited() for _ in range(MAX_ATTEMPTS)])
-    construction_calls: list[tuple[str, type]] = []
-
-    def fake_build(provider, schema):
-        construction_calls.append((provider, schema))
-        raise AssertionError(
-            f"must not construct secondary provider {provider!r} in groq mode"
-        )
-
-    monkeypatch.setattr(
-        llm_module, "build_structured_llm_for_provider", fake_build
-    )
-
-    with pytest.raises(LLMUnavailable):
-        invoke_structured(
-            groq,
-            "prompt",
-            purpose="root-cause synthesis",
-            schema=_TinySchema,
-        )
-
-    assert groq.calls == MAX_ATTEMPTS
-    assert construction_calls == []
-
-
-def test_omitted_schema_does_not_construct_secondary_provider(
-    monkeypatch, no_sleeping
-):
-    """Documents the current contract: without schema=, automatic Groq
-    construction is not attempted even when both keys are configured."""
-    monkeypatch.setenv("LLM_PROVIDER", "gemini")
-    monkeypatch.setenv("GOOGLE_API_KEY", "real-gemini-key")
-    monkeypatch.setenv("GROQ_API_KEY", "gsk_real_groq_key")
-
-    gemini = StubLLM(errors=[quota_exhausted()])
-    construction_calls: list[tuple[str, type]] = []
-
-    def fake_build(provider, schema):
-        construction_calls.append((provider, schema))
-        return StubLLM(result=SimpleNamespace(value="should-not-run"))
-
-    monkeypatch.setattr(
-        llm_module, "build_structured_llm_for_provider", fake_build
-    )
-
-    with pytest.raises(LLMUnavailable):
-        invoke_structured(gemini, "prompt", purpose="root-cause synthesis")
-
-    assert gemini.calls == 1
-    assert construction_calls == []
-    assert no_sleeping == []
