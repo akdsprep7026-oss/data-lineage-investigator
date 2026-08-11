@@ -61,8 +61,8 @@ Python 3.11+ and Node.js 18+ recommended.
    | Variable | Required? | Purpose |
    |---|---|---|
    | `GOOGLE_API_KEY` | For Gemini (default LLM) and optional Gemini embeddings | Gemini chat + `gemini-embedding-001` when `EMBEDDING_PROVIDER=gemini` |
-   | `GROQ_API_KEY` | For `LLM_PROVIDER=groq` | Groq chat (`llama-3.3-70b-versatile` by default) |
-   | `LLM_PROVIDER` | Optional (`gemini` default) | `gemini` or `groq` |
+| `GROQ_API_KEY` | For `LLM_PROVIDER=groq`, and as automatic failover when `LLM_PROVIDER=gemini` | Groq chat (`llama-3.3-70b-versatile` by default) |
+| `LLM_PROVIDER` | Optional (`gemini` default) | `gemini` or `groq`. With `gemini` + both keys, Gemini failures (quota/auth/retries) try Groq before heuristics. `groq` never calls Gemini. |
    | `EMBEDDING_PROVIDER` | Optional | `onnx` (local) or `gemini`. Unset → gemini if a real `GOOGLE_API_KEY` is set, else onnx. After changing, re-run `python -m app.retrieval.ingest`. |
    | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | Optional | Tracing; leave as placeholders to stay offline |
    | `LANGFUSE_BASE_URL` | Optional | Defaults to `https://cloud.langfuse.com` |
@@ -173,7 +173,7 @@ The sandbox warehouse remains the local SQLite dataset under `app/sandbox_data/`
 | `DATABASE_URL` | **Yes** | Neon Postgres connection string (include `sslmode=require`) |
 | `ALLOWED_ORIGINS` | **Yes** | Comma-separated frontend origins, e.g. `https://your-app.vercel.app` |
 | `GOOGLE_API_KEY` | Recommended | Gemini LLM; also Gemini embeddings when `EMBEDDING_PROVIDER=gemini` |
-| `GROQ_API_KEY` | Optional | Alternate LLM when `LLM_PROVIDER=groq` |
+| `GROQ_API_KEY` | Optional | Groq when `LLM_PROVIDER=groq`, or automatic failover after Gemini failure when `LLM_PROVIDER=gemini` |
 | `LLM_PROVIDER` | Optional | `gemini` (default) or `groq` |
 | `EMBEDDING_PROVIDER` | Optional | `onnx` or `gemini` (keep consistent with how the Chroma index was built; re-ingest after changing) |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | Optional | Tracing |
@@ -260,7 +260,7 @@ pytest
 ## Known limitations
 
 - **Incident #4 is a partial match.** The system correctly surfaces the symptom (same transaction re-emitted under a new `order_id`) and conservatively lands in `needs_human_review` at 0.80 confidence, but the LLM's stated mechanism is wrong — it blames window-function row selection instead of the real gap (dedup only partitions by `order_id`, so a brand-new id bypasses it entirely). This is an LLM reasoning miss on the evidence, not a missing specialist or broken validation loop.
-- **Gemini free-tier quota is unstable for this workload** (daily `generate_content` cap of 20). The official `eval_report.md` was therefore run against Groq. Prefer `LLM_PROVIDER=groq` for iterative development; use Gemini when you specifically want that provider and have quota left.
+- **Gemini free-tier quota is unstable for this workload** (daily `generate_content` cap of 20). With `LLM_PROVIDER=gemini` and a configured `GROQ_API_KEY`, hard quota exhaustion fails over to Groq automatically before heuristics. Prefer `LLM_PROVIDER=groq` for iterative development if you want to skip Gemini entirely; use Gemini when you specifically want that provider and have quota left.
 - **Sandbox, not production.** The warehouse, SQL models, pipeline job log, and incidents are a simulated local environment designed for reproducible demos and evaluation — not a connection to a real production data platform.
 
 

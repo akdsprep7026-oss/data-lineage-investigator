@@ -1,27 +1,28 @@
 """Shared LLM access for the specialist nodes (app/graph/sql_review.py
 and app/graph/root_cause.py).
 
-Extends the existing two-way pattern -- real model if configured, local
-heuristic otherwise -- into a three-way one. The provider is chosen by
-LLM_PROVIDER in .env:
+Provider selection is driven by LLM_PROVIDER in .env:
 
     LLM_PROVIDER=gemini   (default) Gemini via GOOGLE_API_KEY
     LLM_PROVIDER=groq               Groq via GROQ_API_KEY
     (neither key usable)            the offline heuristics take over
 
-The point of the Groq path is to keep Gemini's small daily free-tier
-quota in reserve. Dev and test iterations can run against Groq, leaving
-Gemini for final evaluation runs. Retrieval is unaffected either way:
-Groq has no embeddings endpoint, so app/retrieval/embeddings.py keeps
-its own Gemini-or-local-ONNX choice.
+When LLM_PROVIDER=gemini and both keys are configured, a call that
+exhausts Gemini (auth failure, hard quota exhaustion, or retries
+spent) automatically attempts Groq once before raising LLMUnavailable.
+Callers catch that and fall back to their deterministic heuristic.
 
-Calls go through invoke_structured(), which retries transient failures
-with exponential backoff and then gives up by raising LLMUnavailable.
-Callers are expected to catch that and fall back to their heuristic for
-that one call, so a rate limit costs an investigation some accuracy on
-a single step instead of aborting the whole run. Note that backoff only
-helps with per-minute throttling; a *daily* quota won't clear no matter
-how long we wait, which is precisely why the give-up path has to exist.
+When LLM_PROVIDER=groq, Groq is the only cloud provider tried -- Gemini
+is never forced into the chain.
+
+Retrieval is unaffected: Groq has no embeddings endpoint, so
+app/retrieval/embeddings.py keeps its own Gemini-or-local-ONNX choice.
+
+Calls go through invoke_structured(), which retries *transient*
+failures with exponential backoff per provider, then optionally fails
+over to a secondary provider, then raises LLMUnavailable. Hard daily
+quota exhaustion and auth failures skip pointless retries. Schema /
+malformed-output errors still propagate unchanged.
 
 When a Langfuse investigation trace is open (see app/graph/tracing.py),
 each invoke also receives Langfuse's LangChain CallbackHandler so token
@@ -67,7 +68,8 @@ BACKOFF_MULTIPLIER = 2.0
 MAX_BACKOFF_SECONDS = 30.0
 
 # Failures worth waiting out: throttling, transient server errors and
-# network blips.
+# network blips. Note: hard quota exhaustion is detected separately and
+# is NOT retried even though it often also contains "429".
 RETRYABLE_MARKERS = (
     "429",
     "resource_exhausted",
@@ -87,6 +89,21 @@ RETRYABLE_MARKERS = (
     "connection reset",
     "connection error",
     "temporarily unavailable",
+)
+
+# Hard/daily quota signals. Sleeping will not clear these; fail over
+# (or raise LLMUnavailable) immediately. Conservative: require an
+# explicit quota/free-tier cue, not bare "429" / "resource_exhausted".
+HARD_QUOTA_MARKERS = (
+    "quota exceeded",
+    "quota_exceeded",
+    "exceeded your current quota",
+    "free_tier",
+    "free tier",
+    "generate_content_free_tier",
+    "daily limit",
+    "daily quota",
+    "insufficient_quota",
 )
 
 # Failures that won't improve on retry but that the caller can still
@@ -160,13 +177,52 @@ def llm_enabled() -> bool:
     return resolve_provider() is not None
 
 
+def _model_for_provider(provider: str) -> str:
+    return GROQ_MODEL if provider == "groq" else GEMINI_MODEL
+
+
+def _provider_label(provider: str) -> str:
+    return f"{provider}:{_model_for_provider(provider)}"
+
+
 def active_model_label() -> str:
     """Human-readable description of what will actually answer, for
     logging and for the smoke-test scripts."""
     provider = resolve_provider()
     if provider is None:
         return "offline heuristics (no LLM provider configured)"
-    return f"{provider}:{GROQ_MODEL if provider == 'groq' else GEMINI_MODEL}"
+    return _provider_label(provider)
+
+
+def _secondary_provider(primary: str) -> Optional[str]:
+    """Cloud provider to try after `primary` fails, or None.
+
+    Auto-failover only runs when the user requested Gemini and Groq is
+    also configured. Explicit LLM_PROVIDER=groq never pulls Gemini in.
+    """
+    requested = requested_provider()
+    if requested not in PROVIDERS:
+        requested = DEFAULT_PROVIDER
+    if requested != "gemini" or primary != "gemini":
+        return None
+    if _configured_key("groq"):
+        return "groq"
+    return None
+
+
+def _build_chat_model(provider: str) -> Any:
+    if provider == "groq":
+        from langchain_groq import ChatGroq
+
+        return ChatGroq(model=GROQ_MODEL, temperature=0)
+    from langchain_google_genai import ChatGoogleGenerativeAI
+
+    return ChatGoogleGenerativeAI(model=GEMINI_MODEL, temperature=0)
+
+
+def build_structured_llm_for_provider(provider: str, schema: type) -> Any:
+    """Bind `schema` to a specific provider's chat model."""
+    return _build_chat_model(provider).with_structured_output(schema)
 
 
 def build_structured_llm(schema: type) -> Optional[Any]:
@@ -175,22 +231,19 @@ def build_structured_llm(schema: type) -> Optional[Any]:
     provider = resolve_provider()
     if provider is None:
         return None
-
-    if provider == "groq":
-        from langchain_groq import ChatGroq
-
-        model = ChatGroq(model=GROQ_MODEL, temperature=0)
-    else:
-        from langchain_google_genai import ChatGoogleGenerativeAI
-
-        model = ChatGoogleGenerativeAI(model=GEMINI_MODEL, temperature=0)
-
-    return model.with_structured_output(schema)
+    return build_structured_llm_for_provider(provider, schema)
 
 
 def _matches(exc: BaseException, markers: tuple[str, ...]) -> bool:
     text = f"{type(exc).__name__} {exc}".lower()
     return any(marker in text for marker in markers)
+
+
+def _is_hard_quota_exhaustion(exc: BaseException) -> bool:
+    """True when the error indicates a quota/daily free-tier limit that
+    will not clear with short backoff. Bare 429 / RESOURCE_EXHAUSTED
+    without a quota cue is treated as possibly transient instead."""
+    return _matches(exc, HARD_QUOTA_MARKERS)
 
 
 def _server_requested_delay(exc: BaseException) -> Optional[float]:
@@ -206,16 +259,17 @@ def _server_requested_delay(exc: BaseException) -> Optional[float]:
     return None
 
 
-def invoke_structured(llm: Any, prompt: str, *, purpose: str) -> Any:
-    """Invokes `llm`, retrying transient failures with exponential
-    backoff up to MAX_ATTEMPTS times.
+def _invoke_provider_with_retry(
+    llm: Any,
+    prompt: str,
+    *,
+    purpose: str,
+    provider_label: str,
+) -> Any:
+    """Provider-local invoke with exponential backoff.
 
-    Raises LLMUnavailable when the call can't be completed but the
-    caller could reasonably carry on without it (retries exhausted, or a
-    key/model problem that retrying won't fix). Anything else -- a bad
-    prompt, a schema mismatch, a bug in our own code -- propagates
-    unchanged, so real defects stay loud instead of being quietly
-    swallowed as "the model was busy".
+    Raises LLMUnavailable for auth/quota/retry exhaustion. Propagates
+    unrecognized errors (e.g. schema mismatches) unchanged.
     """
     delay = INITIAL_BACKOFF_SECONDS
     last_error: Optional[BaseException] = None
@@ -230,10 +284,18 @@ def invoke_structured(llm: Any, prompt: str, *, purpose: str) -> Any:
         except Exception as exc:
             last_error = exc
 
-            if _matches(exc, DEGRADABLE_MARKERS) and not _matches(exc, RETRYABLE_MARKERS):
+            if _is_hard_quota_exhaustion(exc):
                 raise LLMUnavailable(
-                    f"{purpose}: {active_model_label()} rejected the request "
-                    f"({exc}). Not retrying."
+                    f"{purpose}: {provider_label} quota exhausted "
+                    f"({type(exc).__name__}). Not retrying."
+                ) from exc
+
+            if _matches(exc, DEGRADABLE_MARKERS) and not _matches(
+                exc, RETRYABLE_MARKERS
+            ):
+                raise LLMUnavailable(
+                    f"{purpose}: {provider_label} rejected the request "
+                    f"({type(exc).__name__}). Not retrying."
                 ) from exc
 
             if not _matches(exc, RETRYABLE_MARKERS):
@@ -257,6 +319,79 @@ def invoke_structured(llm: Any, prompt: str, *, purpose: str) -> Any:
             delay *= BACKOFF_MULTIPLIER
 
     raise LLMUnavailable(
-        f"{purpose}: {active_model_label()} still failing after {MAX_ATTEMPTS} "
-        f"attempts ({last_error})."
+        f"{purpose}: {provider_label} still failing after {MAX_ATTEMPTS} "
+        f"attempts ({type(last_error).__name__ if last_error else 'unknown'})."
     ) from last_error
+
+
+def invoke_structured(
+    llm: Any,
+    prompt: str,
+    *,
+    purpose: str,
+    schema: Optional[type] = None,
+    secondary_llm: Any = None,
+) -> Any:
+    """Invokes `llm` with provider-local retries, then optional failover.
+
+    Pass `schema` (and optionally a pre-built `secondary_llm` for tests)
+    so that when the primary provider raises LLMUnavailable and the
+    user requested Gemini with Groq also configured, Groq is tried
+    before LLMUnavailable propagates to the caller's heuristic.
+
+    Schema / malformed-output errors are never converted into failover
+    or heuristics -- they propagate unchanged.
+    """
+    primary = resolve_provider()
+    primary_label = (
+        _provider_label(primary) if primary is not None else active_model_label()
+    )
+
+    try:
+        return _invoke_provider_with_retry(
+            llm, prompt, purpose=purpose, provider_label=primary_label
+        )
+    except LLMUnavailable as primary_exc:
+        secondary = _secondary_provider(primary) if primary is not None else None
+        if secondary is None and secondary_llm is None:
+            raise
+
+        secondary_label = (
+            _provider_label(secondary) if secondary is not None else "secondary"
+        )
+        logger.warning(
+            "%s: %s unavailable (%s); attempting %s fallback.",
+            purpose,
+            primary_label,
+            type(primary_exc).__name__,
+            secondary_label,
+        )
+
+        failover_llm = secondary_llm
+        if failover_llm is None:
+            if schema is None or secondary is None:
+                raise
+            failover_llm = build_structured_llm_for_provider(secondary, schema)
+
+        try:
+            result = _invoke_provider_with_retry(
+                failover_llm,
+                prompt,
+                purpose=purpose,
+                provider_label=secondary_label,
+            )
+        except LLMUnavailable as secondary_exc:
+            logger.warning(
+                "%s: %s unavailable (%s); raising LLMUnavailable for "
+                "heuristic fallback.",
+                purpose,
+                secondary_label,
+                type(secondary_exc).__name__,
+            )
+            raise LLMUnavailable(
+                f"{purpose}: {primary_label} and {secondary_label} unavailable "
+                f"({type(primary_exc).__name__}, {type(secondary_exc).__name__})."
+            ) from secondary_exc
+
+        logger.info("%s: %s fallback succeeded.", purpose, secondary_label)
+        return result

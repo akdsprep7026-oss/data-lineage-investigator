@@ -120,7 +120,10 @@ def _llm_generate_hypotheses(
     )
     try:
         result: _RootCauseSchema = invoke_structured(
-            llm, prompt, purpose="root-cause synthesis"
+            llm,
+            prompt,
+            purpose="root-cause synthesis",
+            schema=_RootCauseSchema,
         )
     except LLMUnavailable as exc:
         # Without this the whole investigation would die here; instead
