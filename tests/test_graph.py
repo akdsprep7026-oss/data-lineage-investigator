@@ -20,6 +20,7 @@ from app.db.investigations import create_investigation, get_investigation
 from app.db.models import InvestigationStatus
 from app.graph.nodes import (
     MAX_RETRIES,
+    MAX_VALIDATION_PASSES,
     RESOLVE_CONFIDENCE_THRESHOLD,
     _select_agents_for_issue,
     _select_new_evidence,
@@ -97,6 +98,7 @@ def test_loop_retries_to_the_cap_when_the_hypothesis_is_never_confirmed():
     final_state = run_investigation("Revenue looks wrong for one day in January.")
 
     assert final_state["retry_count"] == MAX_RETRIES
+    assert final_state["validation_pass_count"] == MAX_VALIDATION_PASSES
     # One note per unconfirmed validation, which includes the final pass
     # that gave up and routed to human review rather than retrying again.
     assert len(final_state["validation_notes"]) == MAX_RETRIES + 1
@@ -107,6 +109,12 @@ def test_loop_retries_to_the_cap_when_the_hypothesis_is_never_confirmed():
     assert investigation.status == InvestigationStatus.NEEDS_HUMAN_REVIEW
     assert investigation.final_root_cause is None
     assert investigation.workflow_state["retries_used"] == MAX_RETRIES
+    assert investigation.workflow_state["validation_pass_count"] == MAX_VALIDATION_PASSES
+    system_notes = [
+        item for item in investigation.evidence if item["source"] == "system"
+    ]
+    assert system_notes
+    assert "could not establish a sufficiently verified root cause" in system_notes[0]["finding"]
 
 
 def test_no_evidence_is_recorded_twice_across_retry_passes():
@@ -285,6 +293,7 @@ def test_route_after_validation_retries_when_the_recheck_contradicts():
         "validation": _validation(confirmed=False),
         "top_hypothesis": _hypothesis(0.95),
         "retry_count": 0,
+        "validation_pass_count": 1,
     }
     assert route_after_validation(state) == "manager"
 
@@ -294,6 +303,7 @@ def test_route_after_validation_retries_when_confidence_is_too_weak():
         "validation": _validation(confirmed=True),
         "top_hypothesis": _hypothesis(0.4),
         "retry_count": 0,
+        "validation_pass_count": 1,
     }
     assert route_after_validation(state) == "manager"
 
@@ -303,6 +313,7 @@ def test_route_after_validation_proceeds_when_confirmed_and_confident():
         "validation": _validation(confirmed=True),
         "top_hypothesis": _hypothesis(0.9),
         "retry_count": 0,
+        "validation_pass_count": 1,
     }
     assert route_after_validation(state) == "human_review"
 
@@ -312,6 +323,19 @@ def test_route_after_validation_stops_looping_once_retries_are_exhausted():
         "validation": _validation(confirmed=False),
         "top_hypothesis": _hypothesis(0.95),
         "retry_count": MAX_RETRIES,
+        "validation_pass_count": 1,
+    }
+    assert route_after_validation(state) == "human_review"
+
+
+def test_route_after_validation_stops_when_validation_pass_cap_is_hit():
+    """Even if retry_count is somehow stuck at 0, the validation pass
+    cap must still terminate the loop."""
+    state = {
+        "validation": _validation(confirmed=False),
+        "top_hypothesis": _hypothesis(0.95),
+        "retry_count": 0,
+        "validation_pass_count": MAX_VALIDATION_PASSES,
     }
     assert route_after_validation(state) == "human_review"
 
@@ -325,6 +349,8 @@ def test_human_review_resolves_a_confidently_supported_hypothesis():
             "top_hypothesis": _hypothesis(0.92, "the join in 01_stg_orders_cleaned.sql"),
             "validation": _validation(confirmed=True),
             "retry_count": 0,
+            "validation_pass_count": 1,
+            "evidence": [],
         }
     )
 
@@ -336,6 +362,30 @@ def test_human_review_resolves_a_confidently_supported_hypothesis():
     assert refetched.final_root_cause == "the join in 01_stg_orders_cleaned.sql"
 
 
+def test_human_review_does_not_resolve_high_confidence_without_confirmation():
+    """Confidence alone is not enough -- validation must confirm."""
+    investigation = create_investigation("confident but unconfirmed")
+    result = human_review_node(
+        {
+            "investigation_id": str(investigation.id),
+            "issue_description": "confident but unconfirmed",
+            "top_hypothesis": _hypothesis(0.95, "a specific-sounding guess"),
+            "validation": _validation(confirmed=False),
+            "retry_count": MAX_RETRIES,
+            "validation_pass_count": MAX_VALIDATION_PASSES,
+            "evidence": [],
+        }
+    )
+
+    assert result["status"] == InvestigationStatus.NEEDS_HUMAN_REVIEW.value
+    assert result["final_root_cause"] is None
+
+    refetched = get_investigation(investigation.id)
+    assert refetched.status == InvestigationStatus.NEEDS_HUMAN_REVIEW
+    assert any(item["source"] == "system" for item in refetched.evidence)
+    assert refetched.workflow_state["review_reason"]
+
+
 def test_human_review_flags_a_weakly_supported_hypothesis_without_asserting_a_cause():
     investigation = create_investigation("low confidence")
     result = human_review_node(
@@ -345,6 +395,8 @@ def test_human_review_flags_a_weakly_supported_hypothesis_without_asserting_a_ca
             "top_hypothesis": _hypothesis(RESOLVE_CONFIDENCE_THRESHOLD, "a guess"),
             "validation": _validation(confirmed=False),
             "retry_count": MAX_RETRIES,
+            "validation_pass_count": MAX_VALIDATION_PASSES,
+            "evidence": [],
         }
     )
 

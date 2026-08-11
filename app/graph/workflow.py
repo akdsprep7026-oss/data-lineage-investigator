@@ -38,6 +38,7 @@ for the shared state schema threaded through them.
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from langgraph.checkpoint.memory import MemorySaver
@@ -45,10 +46,18 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from app.db.investigations import create_investigation
+from app.db.models import InvestigationStatus
 from app.graph import nodes
-from app.graph.nodes import MAX_RETRIES, WELL_SUPPORTED_CONFIDENCE
+from app.graph.nodes import (
+    MAX_RETRIES,
+    MAX_VALIDATION_PASSES,
+    WELL_SUPPORTED_CONFIDENCE,
+    human_review_node,
+)
 from app.graph.state import InvestigationState
 from app.graph.tracing import investigation_trace
+
+logger = logging.getLogger(__name__)
 
 # Worst case the graph visits 8 nodes per pass (manager, lineage_agent,
 # sql_analysis, data_quality, etl_agent, schema_agent, root_cause,
@@ -58,6 +67,11 @@ from app.graph.tracing import investigation_trace
 # MAX_RETRIES is ever increased.
 RECURSION_LIMIT = 50
 
+_TERMINAL_STATUSES = {
+    InvestigationStatus.RESOLVED.value,
+    InvestigationStatus.NEEDS_HUMAN_REVIEW.value,
+}
+
 
 def route_after_validation(state: InvestigationState) -> str:
     """Conditional edge out of validation_node.
@@ -66,23 +80,56 @@ def route_after_validation(state: InvestigationState) -> str:
     the top hypothesis isn't well supported -- either the direct
     re-check contradicted it (or couldn't tie it to a concrete
     artifact), or the confidence behind it is too weak to act on. Once
-    the retry budget is spent, it goes to human_review_node regardless,
-    which is what stops the cycle from running forever: a hypothesis
-    that never gets confirmed ends up flagged for a human rather than
-    retried indefinitely.
+    the retry budget is spent -- or validation has already run
+    MAX_VALIDATION_PASSES times -- it goes to human_review_node
+    regardless, which is what stops the cycle from running forever: a
+    hypothesis that never gets confirmed ends up flagged for a human
+    rather than retried indefinitely.
     """
     validation = state.get("validation")
     top_hypothesis = state.get("top_hypothesis")
     confidence = top_hypothesis["confidence_score"] if top_hypothesis else 0.0
+    retry_count = state.get("retry_count", 0)
+    validation_pass_count = state.get("validation_pass_count", 0)
 
     well_supported = bool(
         validation
         and validation["confirmed"]
         and confidence >= WELL_SUPPORTED_CONFIDENCE
     )
-    if well_supported or state.get("retry_count", 0) >= MAX_RETRIES:
-        return "human_review"
-    return "manager"
+    retries_exhausted = retry_count >= MAX_RETRIES
+    validation_cap_hit = validation_pass_count >= MAX_VALIDATION_PASSES
+
+    if well_supported or retries_exhausted or validation_cap_hit:
+        next_node = "human_review"
+        reason = (
+            "well_supported"
+            if well_supported
+            else (
+                "retries_exhausted"
+                if retries_exhausted
+                else "validation_pass_cap"
+            )
+        )
+    else:
+        next_node = "manager"
+        reason = "retry_for_more_evidence"
+
+    logger.info(
+        "route_after_validation id=%s decision=%s reason=%s "
+        "retry_count=%s/%s validation_pass_count=%s/%s confirmed=%s "
+        "confidence=%s",
+        state.get("investigation_id"),
+        next_node,
+        reason,
+        retry_count,
+        MAX_RETRIES,
+        validation_pass_count,
+        MAX_VALIDATION_PASSES,
+        bool(validation and validation.get("confirmed")),
+        confidence,
+    )
+    return next_node
 
 
 def build_graph() -> CompiledStateGraph:
@@ -122,6 +169,27 @@ def build_graph() -> CompiledStateGraph:
     return graph.compile(checkpointer=MemorySaver())
 
 
+def _ensure_terminal_status(state: InvestigationState) -> InvestigationState:
+    """Safety net: every successful graph return must leave a terminal
+    status. If a path somehow ends without human_review_node, force it
+    so the row never stays stuck in investigating after invoke returns.
+    """
+    status = state.get("status")
+    if status in _TERMINAL_STATUSES:
+        return state
+
+    logger.error(
+        "Graph returned non-terminal status=%s for id=%s "
+        "(retry_count=%s validation_pass_count=%s); forcing human_review",
+        status,
+        state.get("investigation_id"),
+        state.get("retry_count", 0),
+        state.get("validation_pass_count", 0),
+    )
+    hr_update = human_review_node(state)
+    return {**state, **hr_update}
+
+
 def run_investigation(
     issue_description: str,
     *,
@@ -155,6 +223,7 @@ def run_investigation(
         "relevant_sql_models": [],
         "relevant_tables": [],
         "retry_count": 0,
+        "validation_pass_count": 0,
         "agents_completed": [],
         "follow_up_query": None,
         "top_hypothesis": None,
@@ -168,12 +237,24 @@ def run_investigation(
 
     with investigation_trace(investigation_id, issue_description) as root:
         final_state = graph.invoke(initial_state, config=config)
+        final_state = _ensure_terminal_status(final_state)
+        logger.info(
+            "run_investigation complete id=%s status=%s retry_count=%s "
+            "validation_pass_count=%s",
+            final_state.get("investigation_id"),
+            final_state.get("status"),
+            final_state.get("retry_count", 0),
+            final_state.get("validation_pass_count", 0),
+        )
         if root is not None:
             root.update(
                 output={
                     "investigation_id": final_state.get("investigation_id"),
                     "status": final_state.get("status"),
                     "retry_count": final_state.get("retry_count", 0),
+                    "validation_pass_count": final_state.get(
+                        "validation_pass_count", 0
+                    ),
                     "evidence_count": len(final_state.get("evidence") or []),
                     "hypotheses_count": len(final_state.get("hypotheses") or []),
                     "final_root_cause": final_state.get("final_root_cause"),

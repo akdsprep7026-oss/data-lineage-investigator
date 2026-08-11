@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 import os
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
 from uuid import UUID
 
 from dotenv import load_dotenv
@@ -24,6 +26,7 @@ from app.db.investigations import (
     create_investigation,
     get_investigation,
     list_investigations,
+    reap_stale_investigations,
     update_investigation,
 )
 from app.db.models import Investigation, InvestigationStatus
@@ -48,7 +51,28 @@ def _cors_origins() -> list[str]:
     return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
 
-app = FastAPI(title="Data Lineage Investigator")
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """On startup, reclaim investigations orphaned by a dead worker.
+
+    Failures here are logged and swallowed so a reaper/DB glitch cannot
+    take the API offline.
+    """
+    logger.info("Startup stale-investigation reaper starting")
+    try:
+        reclaimed = reap_stale_investigations()
+        logger.info(
+            "Startup stale-investigation reaper finished reclaimed=%s",
+            reclaimed,
+        )
+    except Exception:  # noqa: BLE001 - recovery must not block API startup
+        logger.exception(
+            "Startup stale-investigation reaper failed; API will still start"
+        )
+    yield
+
+
+app = FastAPI(title="Data Lineage Investigator", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -161,11 +185,64 @@ def _run_investigation_background(
             )
         return
 
+    status = final_state.get("status")
     logger.info(
-        "Background investigation finished id=%s status=%s",
+        "Background investigation finished id=%s status=%s "
+        "retry_count=%s validation_pass_count=%s",
         investigation_id,
-        final_state.get("status"),
+        status,
+        final_state.get("retry_count", 0),
+        final_state.get("validation_pass_count", 0),
     )
+
+    # Belt-and-suspenders: if invoke returned without a terminal DB
+    # status (should not happen after _ensure_terminal_status), force one.
+    if status not in {
+        InvestigationStatus.RESOLVED.value,
+        InvestigationStatus.NEEDS_HUMAN_REVIEW.value,
+    }:
+        logger.error(
+            "Background investigation id=%s returned non-terminal "
+            "status=%s; forcing needs_human_review",
+            investigation_id,
+            status,
+        )
+        try:
+            _mark_investigation_failed(
+                investigation_id,
+                RuntimeError(
+                    f"graph returned non-terminal status={status!r}"
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Failed to force terminal status for id=%s", investigation_id
+            )
+        return
+
+    persisted = get_investigation(investigation_id)
+    if (
+        persisted is not None
+        and persisted.status == InvestigationStatus.INVESTIGATING
+    ):
+        logger.error(
+            "Background investigation id=%s finished in-memory as %s but "
+            "DB row still investigating; forcing needs_human_review",
+            investigation_id,
+            status,
+        )
+        try:
+            _mark_investigation_failed(
+                investigation_id,
+                RuntimeError(
+                    "in-memory terminal status was not persisted to the "
+                    "investigations row"
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Failed to force terminal status for id=%s", investigation_id
+            )
 
 
 @app.post("/investigations", response_model=InvestigationCreateResponse)

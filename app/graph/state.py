@@ -109,12 +109,17 @@ class InvestigationState(TypedDict):
 
     # Loop control (see app/graph/workflow.py). `retry_count` is the
     # number of times validation_node has sent the investigation back to
-    # manager_node; `agents_completed` is every specialist that has run
-    # in any pass, so a retry can deliberately pick a *different* one;
+    # manager_node; `validation_pass_count` is how many times
+    # validation_node itself has run (1 initial + up to MAX_RETRIES
+    # retries). Both are checked by route_after_validation so a
+    # mis-incremented retry_count cannot loop forever.
+    # `agents_completed` is every specialist that has run in any pass,
+    # so a retry can deliberately pick a *different* one;
     # `follow_up_query` is the refocused retrieval query manager_node
     # builds from what validation couldn't confirm, so a re-run of
     # lineage_agent_node surfaces new context instead of the same hits.
     retry_count: int
+    validation_pass_count: int
     agents_completed: list[str]
     follow_up_query: Optional[str]
     top_hypothesis: Optional[Hypothesis]

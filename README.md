@@ -179,6 +179,7 @@ The sandbox warehouse remains the local SQLite dataset under `app/sandbox_data/`
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | Optional | Tracing |
 | `LANGFUSE_BASE_URL` | Optional | Defaults to `https://cloud.langfuse.com` |
 | `LANGFUSE_TRACING` | Optional | Set `false` to disable tracing |
+| `STALE_INVESTIGATION_MINUTES` | Optional | Minutes without `updated_at` progress before startup reaper marks pending/investigating rows `needs_human_review` (default **30**) |
 
 Start command on Render:
 

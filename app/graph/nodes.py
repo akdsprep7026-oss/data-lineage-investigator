@@ -46,6 +46,7 @@ respect:
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
 
 from app.db.investigations import (
@@ -69,6 +70,8 @@ from app.graph.state import (
 from app.graph.tracing import traced_node
 from app.graph.validation import validate_hypothesis
 from app.mcp_servers.client import RETRIEVAL_SERVER, call_tool
+
+logger = logging.getLogger(__name__)
 
 # Every specialist agent the manager can dispatch, in the order they run
 # within a pass. lineage_agent always runs (every other specialist
@@ -132,6 +135,11 @@ def _select_agents_for_issue(issue_description: str) -> list[str]:
 # How many times validation_node may send an investigation back to
 # manager_node before it has to be handed off for review regardless.
 MAX_RETRIES = 2
+
+# Absolute cap on validation_node executions (1 initial + MAX_RETRIES
+# retries). Checked alongside retry_count so a stuck/miscounted
+# retry_count cannot keep the graph looping forever.
+MAX_VALIDATION_PASSES = MAX_RETRIES + 1
 
 # Above this, human_review_node closes the investigation as resolved;
 # at or below it, the investigation is flagged for a human instead of
@@ -218,7 +226,9 @@ def _workflow_snapshot(state: InvestigationState, node: str, **extra: Any) -> di
     snapshot = {
         "current_node": node,
         "retry_count": state.get("retry_count", 0),
+        "validation_pass_count": state.get("validation_pass_count", 0),
         "max_retries": MAX_RETRIES,
+        "max_validation_passes": MAX_VALIDATION_PASSES,
         "agents_to_run": list(state.get("agents_to_run") or []),
         "agents_completed": list(state.get("agents_completed") or []),
         "follow_up_query": state.get("follow_up_query"),
@@ -353,6 +363,7 @@ def manager_node(state: InvestigationState) -> dict:
         "agents_to_run": _select_agents_for_issue(state["issue_description"]),
         "agents_completed": [],
         "retry_count": 0,
+        "validation_pass_count": state.get("validation_pass_count", 0),
         "follow_up_query": None,
     }
     _record_transition(
@@ -675,7 +686,9 @@ def validation_node(state: InvestigationState) -> dict:
     is kept in `validation_notes` for manager_node to retry against and
     for root_cause_node to avoid re-proposing.
     """
-    _record_transition(state, "validation")
+    validation_pass_count = state.get("validation_pass_count", 0) + 1
+    working = {**state, "validation_pass_count": validation_pass_count}
+    _record_transition(working, "validation")
     top_hypothesis = state.get("top_hypothesis")
     outcome: ValidationOutcome = validate_hypothesis(top_hypothesis)
 
@@ -688,28 +701,45 @@ def validation_node(state: InvestigationState) -> dict:
         confidence=0.9 if outcome["confirmed"] else 0.7,
     )
     evidence = _select_new_evidence(state, [entry])
-    _persist_evidence(state, "validation", evidence)
+    _persist_evidence(working, "validation", evidence)
 
     notes: list[str] = []
     if not outcome["confirmed"]:
         claimed = top_hypothesis["description"] if top_hypothesis else "(no hypothesis)"
         notes.append(f"{claimed} -> {outcome['note']}")
 
+    logger.info(
+        "validation_node id=%s pass=%s/%s retry_count=%s confirmed=%s "
+        "gap=%s confidence=%s",
+        state.get("investigation_id"),
+        validation_pass_count,
+        MAX_VALIDATION_PASSES,
+        state.get("retry_count", 0),
+        outcome["confirmed"],
+        outcome.get("gap"),
+        (top_hypothesis or {}).get("confidence_score"),
+    )
     _record_transition(
-        {**state, "validation": outcome},
+        {**working, "validation": outcome},
         "validation",
         validation_confirmed=outcome["confirmed"],
         validation_gap=outcome["gap"],
     )
-    return {"evidence": evidence, "validation": outcome, "validation_notes": notes}
+    return {
+        "evidence": evidence,
+        "validation": outcome,
+        "validation_notes": notes,
+        "validation_pass_count": validation_pass_count,
+    }
 
 
 @traced_node("human_review")
 def human_review_node(state: InvestigationState) -> dict:
     """Terminal node. Closes the investigation as RESOLVED only when the
-    top hypothesis clears RESOLVE_CONFIDENCE_THRESHOLD; otherwise marks
-    it NEEDS_HUMAN_REVIEW and leaves final_root_cause unset rather than
-    asserting a conclusion the evidence doesn't support.
+    top hypothesis both clears RESOLVE_CONFIDENCE_THRESHOLD *and* was
+    confirmed by validation_node; otherwise marks it NEEDS_HUMAN_REVIEW
+    and leaves final_root_cause unset rather than asserting a conclusion
+    the evidence doesn't support.
 
     A hypothesis sitting exactly on the threshold is treated as not
     clearing it, on the same don't-fabricate-certainty principle.
@@ -719,14 +749,47 @@ def human_review_node(state: InvestigationState) -> dict:
     confidence = top_hypothesis["confidence_score"] if top_hypothesis else 0.0
     validation = state.get("validation")
     confirmed = bool(validation and validation["confirmed"])
+    retries_used = state.get("retry_count", 0)
+    validation_passes = state.get("validation_pass_count", 0)
 
-    if confidence > RESOLVE_CONFIDENCE_THRESHOLD:
+    if confirmed and confidence > RESOLVE_CONFIDENCE_THRESHOLD:
         status = InvestigationStatus.RESOLVED
         final_root_cause = top_hypothesis["description"]
+        review_reason = None
+        system_evidence: list[EvidenceEntry] = []
     else:
         status = InvestigationStatus.NEEDS_HUMAN_REVIEW
         final_root_cause = None
+        review_reason = (
+            "Automated validation could not establish a sufficiently "
+            "verified root cause"
+            + (
+                f" after {validation_passes} validation pass(es) "
+                f"and {retries_used} retry pass(es)."
+                if validation_passes or retries_used
+                else "."
+            )
+            + " Prior evidence and hypotheses were preserved for human review."
+        )
+        system_finding = EvidenceEntry(
+            source="system",
+            finding=review_reason,
+            confidence=1.0,
+        )
+        system_evidence = _select_new_evidence(state, [system_finding])
+        for entry in system_evidence:
+            update_investigation(state["investigation_id"], add_evidence=entry)
 
+    logger.info(
+        "human_review_node id=%s next_status=%s confirmed=%s confidence=%s "
+        "retry_count=%s validation_pass_count=%s",
+        state.get("investigation_id"),
+        status.value,
+        confirmed,
+        confidence,
+        retries_used,
+        validation_passes,
+    )
     _record_transition(
         state,
         "human_review",
@@ -735,6 +798,11 @@ def human_review_node(state: InvestigationState) -> dict:
         outcome=status.value,
         top_hypothesis_confidence=confidence,
         validation_confirmed=confirmed,
-        retries_used=state.get("retry_count", 0),
+        retries_used=retries_used,
+        validation_pass_count=validation_passes,
+        review_reason=review_reason,
     )
-    return {"status": status.value, "final_root_cause": final_root_cause}
+    update: dict = {"status": status.value, "final_root_cause": final_root_cause}
+    if system_evidence:
+        update["evidence"] = system_evidence
+    return update

@@ -188,6 +188,39 @@ def test_successful_background_run_keeps_human_review_terminal_status():
     assert updated.final_root_cause == "build_fct_daily_revenue keeps failing"
 
 
+def test_background_run_forces_terminal_when_graph_returns_non_terminal_status():
+    investigation = create_investigation("Non-terminal graph return")
+    update_investigation(
+        investigation.id,
+        status=InvestigationStatus.INVESTIGATING,
+        workflow_state={"current_node": "validation", "retry_count": 1},
+        add_evidence={
+            "source": "lineage",
+            "finding": "prior finding",
+            "confidence": 0.5,
+        },
+    )
+
+    with patch(
+        "app.api.main.run_investigation",
+        return_value={
+            "status": InvestigationStatus.INVESTIGATING.value,
+            "retry_count": 1,
+            "validation_pass_count": 2,
+        },
+    ):
+        _run_investigation_background(
+            investigation.issue_description, str(investigation.id)
+        )
+
+    updated = get_investigation(investigation.id)
+    assert updated is not None
+    assert updated.status == InvestigationStatus.NEEDS_HUMAN_REVIEW
+    assert updated.workflow_state["retry_count"] == 1
+    assert any(item["source"] == "lineage" for item in updated.evidence)
+    assert any(item["source"] == "system" for item in updated.evidence)
+
+
 def test_low_confidence_background_run_ends_in_needs_human_review():
     investigation = create_investigation("Weak hypothesis case")
 
@@ -209,6 +242,7 @@ def test_low_confidence_background_run_ends_in_needs_human_review():
                     "gap": "unknown",
                 },
                 "retry_count": 2,
+                "validation_pass_count": 3,
                 "agents_to_run": [],
                 "agents_completed": [],
                 "validation_notes": [],
@@ -227,3 +261,4 @@ def test_low_confidence_background_run_ends_in_needs_human_review():
     assert updated is not None
     assert updated.status == InvestigationStatus.NEEDS_HUMAN_REVIEW
     assert updated.final_root_cause is None
+    assert any(item["source"] == "system" for item in updated.evidence)
