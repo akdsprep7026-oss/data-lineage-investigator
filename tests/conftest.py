@@ -9,6 +9,11 @@ Also clears Langfuse credentials (and forces LANGFUSE_TRACING=false) so
 the Step 9 tracing layer stays a no-op in the suite -- no network
 calls, no dashboard noise from unit tests.
 
+Clears DATABASE_URL so the suite always uses the embedded pgserver
+fallback. Production sets DATABASE_URL (Neon) and never falls back; a
+developer `.env` may still point at unreachable localhost Postgres from
+older templates, which would fail the suite under that production rule.
+
 This is a suite-wide fixture rather than a per-test one deliberately: a
 test that accidentally reaches a live model is slow, costs quota, and --
 worst of all -- stops being deterministic. Clearing the keys in one
@@ -36,3 +41,6 @@ def force_offline_llm(monkeypatch):
     for env_var in LANGFUSE_ENV_VARS:
         monkeypatch.delenv(env_var, raising=False)
     monkeypatch.setenv("LANGFUSE_TRACING", "false")
+    # Match local-dev "DATABASE_URL unset → embedded Postgres" even when
+    # a developer's .env still has a placeholder production DSN.
+    monkeypatch.delenv("DATABASE_URL", raising=False)

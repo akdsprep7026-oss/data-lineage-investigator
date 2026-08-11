@@ -8,8 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from app.retrieval.ingest import COLLECTION_NAME, get_chroma_client
-from app.retrieval.embeddings import get_embedding_function
+from app.retrieval.ingest import get_collection
 
 
 def retrieve(
@@ -28,11 +27,12 @@ def retrieve(
         A list of up to n_results dicts, ordered most-relevant first:
         {"document": str, "metadata": dict, "distance": float}.
         Lower distance means more similar.
+
+    Opens the collection via get_collection(), which reuses the
+    embedding function persisted at ingest time so query never conflicts
+    with the index (e.g. ONNX-built index + Gemini key in the env).
     """
-    client = get_chroma_client()
-    collection = client.get_or_create_collection(
-        COLLECTION_NAME, embedding_function=get_embedding_function()
-    )
+    collection = get_collection()
 
     where = {"type": filter_type} if filter_type else None
     results = collection.query(

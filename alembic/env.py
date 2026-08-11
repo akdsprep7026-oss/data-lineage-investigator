@@ -19,7 +19,7 @@ from app.db.models import Base  # noqa: E402
 config = context.config
 
 # Resolve the DB URL the same way the app does: DATABASE_URL from .env if
-# reachable, otherwise the self-contained embedded Postgres fallback.
+# set (production), otherwise the self-contained embedded Postgres fallback.
 config.set_main_option("sqlalchemy.url", get_database_url())
 
 # Interpret the config file for Python logging.

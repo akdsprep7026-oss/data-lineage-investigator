@@ -29,7 +29,11 @@ from typing import Any
 
 import chromadb
 
-from app.retrieval.embeddings import get_embedding_function
+from app.retrieval.embeddings import (
+    get_embedding_function,
+    provider_from_chroma_name,
+    resolve_embedding_provider,
+)
 
 RETRIEVAL_DIR = Path(__file__).resolve().parent
 APP_DIR = RETRIEVAL_DIR.parent
@@ -160,10 +164,39 @@ def get_chroma_client() -> chromadb.ClientAPI:
     return chromadb.PersistentClient(path=str(CHROMA_PERSIST_DIR))
 
 
-def get_collection(client: chromadb.ClientAPI | None = None):
+def _persisted_embedding_provider(client: chromadb.ClientAPI) -> str | None:
+    """Provider name recorded on an existing collection, if any."""
+    try:
+        collection = client.get_collection(COLLECTION_NAME)
+    except Exception:
+        return None
+    config = getattr(collection, "configuration_json", None) or {}
+    ef = config.get("embedding_function") or {}
+    return provider_from_chroma_name(ef.get("name"))
+
+
+def get_collection(
+    client: chromadb.ClientAPI | None = None,
+    *,
+    create_if_missing: bool = True,
+):
+    """Opens the sandbox_data collection with a compatible embedding fn.
+
+    If the collection already exists, Chroma's persisted embedding
+    function is reused (via get_collection with no override) so query
+    never conflicts with a previously ingested index. New collections
+    are created with the currently configured provider from
+    app.retrieval.embeddings.
+    """
     client = client or get_chroma_client()
+    try:
+        return client.get_collection(COLLECTION_NAME)
+    except Exception:
+        if not create_if_missing:
+            raise
     return client.get_or_create_collection(
-        COLLECTION_NAME, embedding_function=get_embedding_function()
+        COLLECTION_NAME,
+        embedding_function=get_embedding_function(resolve_embedding_provider()),
     )
 
 
@@ -174,15 +207,32 @@ def ingest(reset: bool = True) -> int:
     If reset=True (the default), any existing collection is dropped
     first so re-running always reflects the current sandbox state --
     important since app/sandbox_data/incidents/*.py can rewrite the SQL
-    model and pipeline_jobs.json files at any time.
+    model and pipeline_jobs.json files at any time. The rebuilt
+    collection uses the embedding provider selected by
+    EMBEDDING_PROVIDER / GOOGLE_API_KEY (see embeddings.py).
     """
     client = get_chroma_client()
+    provider = resolve_embedding_provider()
     if reset:
         try:
             client.delete_collection(COLLECTION_NAME)
         except Exception:
             pass
-    collection = get_collection(client)
+    else:
+        existing = _persisted_embedding_provider(client)
+        if existing is not None and existing != provider:
+            raise RuntimeError(
+                f"Chroma collection '{COLLECTION_NAME}' was built with "
+                f"embedding provider {existing!r}, but the process is "
+                f"configured for {provider!r}. Re-run ingest with "
+                f"reset=True (the default for `python -m app.retrieval.ingest`) "
+                f"or set EMBEDDING_PROVIDER={existing}."
+            )
+
+    collection = client.get_or_create_collection(
+        COLLECTION_NAME,
+        embedding_function=get_embedding_function(provider),
+    )
 
     all_documents = (
         _load_sql_model_documents()

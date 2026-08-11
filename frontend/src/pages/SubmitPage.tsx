@@ -31,34 +31,62 @@ export function SubmitPage() {
   }
 
   return (
-    <Card className="max-w-2xl">
-      <CardTitle>Start an investigation</CardTitle>
-      <CardDescription>
-        Describe the data issue. The agents will gather evidence and propose a
-        root cause.
-      </CardDescription>
+    <div className="mx-auto max-w-2xl">
+      <Card>
+        <div className="mb-1 inline-flex items-center rounded-md bg-[var(--accent-muted)] px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider text-[var(--accent)]">
+          New investigation
+        </div>
+        <CardTitle className="mt-3 text-xl sm:text-2xl">
+          Describe the data issue
+        </CardTitle>
+        <CardDescription className="max-w-lg">
+          Specialists gather lineage, SQL, warehouse, ETL, and schema evidence,
+          then propose a validated root cause.
+        </CardDescription>
 
-      <form className="mt-5 space-y-4" onSubmit={onSubmit}>
-        <label className="block space-y-2">
-          <span className="text-sm font-medium">Issue description</span>
-          <Textarea
-            value={issueDescription}
-            onChange={(event) => setIssueDescription(event.target.value)}
-            placeholder="e.g. Total revenue for 2024-01-20 looks lower than expected..."
-            disabled={submitting}
-          />
-        </label>
+        <form className="mt-6 space-y-5" onSubmit={onSubmit}>
+          <label className="block space-y-2">
+            <span className="text-sm font-semibold text-[var(--foreground)]">
+              Issue description
+            </span>
+            <Textarea
+              value={issueDescription}
+              onChange={(event) => setIssueDescription(event.target.value)}
+              placeholder="e.g. Total revenue for 2024-01-20 looks lower than expected on the daily dashboard…"
+              disabled={submitting}
+              aria-invalid={Boolean(error)}
+            />
+          </label>
 
-        {error ? (
-          <p className="m-0 text-sm text-[var(--danger)]" role="alert">
-            {error}
-          </p>
-        ) : null}
+          {error ? (
+            <div
+              className="rounded-[10px] border border-rose-200 bg-[var(--danger-muted)] px-3.5 py-2.5 text-sm text-[var(--danger)]"
+              role="alert"
+            >
+              {error}
+            </div>
+          ) : null}
 
-        <Button type="submit" disabled={submitting}>
-          {submitting ? "Starting…" : "Start investigation"}
-        </Button>
-      </form>
-    </Card>
+          <div className="flex flex-wrap items-center gap-3 pt-1">
+            <Button type="submit" disabled={submitting}>
+              {submitting ? (
+                <>
+                  <span
+                    className="size-3.5 animate-pulse-soft rounded-full bg-white/80"
+                    aria-hidden
+                  />
+                  Starting…
+                </>
+              ) : (
+                "Start investigation"
+              )}
+            </Button>
+            <p className="m-0 text-xs text-[var(--muted-soft)]">
+              You’ll be taken to the live detail view while agents run.
+            </p>
+          </div>
+        </form>
+      </Card>
+    </div>
   );
 }

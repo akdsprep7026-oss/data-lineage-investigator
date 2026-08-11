@@ -1,18 +1,33 @@
 @import "tailwindcss";
 
 :root {
-  --background: #f6f7f9;
-  --foreground: #14181f;
+  --background: #f3f4f6;
+  --background-elevated: #fafbfc;
+  --foreground: #0c1222;
   --card: #ffffff;
-  --muted: #5c6573;
-  --border: #d8dee8;
-  --accent: #1f4b7a;
+  --muted: #5c6578;
+  --muted-soft: #8b93a7;
+  --border: #e4e7ec;
+  --border-strong: #cfd5e0;
+  --accent: #0f766e;
+  --accent-hover: #0d9488;
+  --accent-muted: rgba(15, 118, 110, 0.08);
   --accent-foreground: #ffffff;
-  --success: #1f6b4a;
-  --warning: #8a5a12;
-  --danger: #8a2430;
-  --ring: #1f4b7a;
-  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  --success: #047857;
+  --success-muted: rgba(4, 120, 87, 0.1);
+  --warning: #b45309;
+  --warning-muted: rgba(180, 83, 9, 0.1);
+  --danger: #be123c;
+  --danger-muted: rgba(190, 18, 60, 0.08);
+  --info: #0369a1;
+  --info-muted: rgba(3, 105, 161, 0.1);
+  --ring: #0f766e;
+  --shadow-card: 0 1px 2px rgba(12, 18, 34, 0.04), 0 8px 24px rgba(12, 18, 34, 0.04);
+  --radius: 12px;
+  --font-sans: "Plus Jakarta Sans", "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  font-family: var(--font-sans);
   color: var(--foreground);
   background: var(--background);
   line-height: 1.5;
@@ -30,8 +45,9 @@ body {
   margin: 0;
   min-height: 100vh;
   background:
-    radial-gradient(circle at top left, rgba(31, 75, 122, 0.08), transparent 40%),
-    var(--background);
+    radial-gradient(ellipse 80% 50% at 0% -10%, rgba(15, 118, 110, 0.07), transparent 55%),
+    radial-gradient(ellipse 60% 40% at 100% 0%, rgba(3, 105, 161, 0.05), transparent 50%),
+    linear-gradient(180deg, var(--background-elevated) 0%, var(--background) 40%);
 }
 
 #root {
@@ -41,4 +57,33 @@ body {
 a {
   color: inherit;
   text-decoration: none;
+}
+
+@keyframes pulse-soft {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+.animate-pulse-soft {
+  animation: pulse-soft 1.6s ease-in-out infinite;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.35s ease-out both;
 }

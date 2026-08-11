@@ -1,14 +1,17 @@
 """Database engine/session setup shared by app/db/*.
 
-If DATABASE_URL (see .env) points at a real, reachable Postgres
-instance, that's what gets used -- this is what production/staging
-should always do. If it's unset or unreachable (e.g. a fresh local dev
-checkout with no Postgres server installed), we transparently fall back
-to a self-contained embedded Postgres server via the `pgserver` package,
-backed by a persistent local data directory (app/db/.pgdata) so data
-survives across process restarts. This keeps `investigations` a real
-Postgres table (JSONB, native enum, etc.) in every environment without
-requiring a manual Postgres install just to run tests locally.
+If DATABASE_URL (see .env) is set, that DSN is always used -- this is
+what production/staging (e.g. Neon on Render) should do. A failed
+connect raises; we do not silently fall back to embedded Postgres when
+a production URL is configured.
+
+If DATABASE_URL is unset/empty (typical fresh local checkout), we
+transparently fall back to a self-contained embedded Postgres server
+via the `pgserver` package, backed by a persistent local data directory
+(app/db/.pgdata) so data survives across process restarts. This keeps
+`investigations` a real Postgres table (JSONB, native enum, etc.) in
+every environment without requiring a manual Postgres install just to
+run tests locally.
 
 Unclean shutdowns (laptop reboot, killed uvicorn) can leave a stale
 `postmaster.pid` or a half-recovered data directory that makes the next
@@ -265,15 +268,21 @@ def _start_embedded_postgres() -> str:
 
 
 def get_database_url() -> str:
-    database_url = os.getenv("DATABASE_URL")
+    database_url = (os.getenv("DATABASE_URL") or "").strip()
     if database_url:
+        # Production/staging: honor the configured DSN. Do not fall back
+        # to embedded Postgres if Neon (or any remote) is briefly unreachable.
         try:
             probe_engine = create_engine(database_url)
             with probe_engine.connect():
                 pass
-            return database_url
-        except Exception:
-            pass  # fall through to the embedded Postgres server below
+        except Exception as exc:
+            raise RuntimeError(
+                "DATABASE_URL is set but the database is unreachable. "
+                "Fix the DSN (Neon typically needs sslmode=require) or "
+                "unset DATABASE_URL to use the local embedded Postgres fallback."
+            ) from exc
+        return database_url
     return _start_embedded_postgres()
 
 

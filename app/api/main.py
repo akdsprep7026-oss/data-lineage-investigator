@@ -7,8 +7,10 @@ create (kicks off a background graph run), fetch one, and list history.
 from __future__ import annotations
 
 import logging
+import os
 from uuid import UUID
 
+from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -26,17 +28,30 @@ from app.db.investigations import (
 from app.db.models import Investigation
 from app.graph.workflow import run_investigation
 
+load_dotenv()
+
 logger = logging.getLogger(__name__)
+
+# Local Vite defaults when ALLOWED_ORIGINS is unset.
+_DEFAULT_CORS_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+
+
+def _cors_origins() -> list[str]:
+    """Comma-separated ALLOWED_ORIGINS, or local Vite defaults if unset."""
+    raw = os.getenv("ALLOWED_ORIGINS", "").strip()
+    if not raw:
+        return list(_DEFAULT_CORS_ORIGINS)
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
 
 app = FastAPI(title="Data Lineage Investigator")
 
-# Vite defaults to http://localhost:5173; allow local frontend origins.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

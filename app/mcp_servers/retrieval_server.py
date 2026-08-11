@@ -21,13 +21,13 @@ step performed by whoever set up the scenario (see
 app/graph/evaluate.py), not something an investigating agent should be
 able to trigger.
 
-One operational note: the embedding model is chosen at query time by
-app/retrieval/embeddings.py from GOOGLE_API_KEY, and a query has to be
-embedded with the same model the index was built with. This server
-therefore has to see the same environment as the process that ran
-`ingest()` -- which is why app/mcp_servers/client.py mirrors the
-parent's API-key variables into the server process explicitly rather
-than letting the child re-read .env for itself.
+One operational note: embeddings are selected by
+app/retrieval/embeddings.py (`EMBEDDING_PROVIDER` / `GOOGLE_API_KEY`).
+Ingest persists the chosen function on the Chroma collection; query
+reuses that persisted function so an ONNX-built index is never queried
+with Gemini (and vice versa). `app/mcp_servers/client.py` still mirrors
+`GOOGLE_API_KEY` / `EMBEDDING_PROVIDER` into this process so a fresh
+collection created here would match the parent's config.
 """
 
 from __future__ import annotations

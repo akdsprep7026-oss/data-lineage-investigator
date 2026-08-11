@@ -29,7 +29,7 @@ Supporting layers:
 | FastAPI (`app/api`) | `/health`, `POST/GET /investigations`, background graph runs |
 | React frontend (`frontend/`) | Submit / Detail / History views (Vite proxies to the API) |
 | Sandbox warehouse | SQLite warehouse + 4 incident scenarios under `app/sandbox_data/` |
-| Investigations DB | Postgres table via Alembic; embedded `pgserver` fallback if `DATABASE_URL` is unset/unreachable |
+| Investigations DB | Postgres table via Alembic; embedded `pgserver` fallback if `DATABASE_URL` is unset |
 | Retrieval | Chroma index over SQL models / docs (`app/retrieval/`) |
 | MCP servers | Postgres + retrieval tools (`app/mcp_servers/`) |
 | Langfuse | Per-investigation traces, node spans, token usage |
@@ -60,12 +60,14 @@ Python 3.11+ and Node.js 18+ recommended.
 
    | Variable | Required? | Purpose |
    |---|---|---|
-   | `GOOGLE_API_KEY` | For Gemini (default LLM) and embeddings | Gemini chat + `gemini-embedding-001` |
+   | `GOOGLE_API_KEY` | For Gemini (default LLM) and optional Gemini embeddings | Gemini chat + `gemini-embedding-001` when `EMBEDDING_PROVIDER=gemini` |
    | `GROQ_API_KEY` | For `LLM_PROVIDER=groq` | Groq chat (`llama-3.3-70b-versatile` by default) |
    | `LLM_PROVIDER` | Optional (`gemini` default) | `gemini` or `groq` |
+   | `EMBEDDING_PROVIDER` | Optional | `onnx` (local) or `gemini`. Unset → gemini if a real `GOOGLE_API_KEY` is set, else onnx. After changing, re-run `python -m app.retrieval.ingest`. |
    | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | Optional | Tracing; leave as placeholders to stay offline |
    | `LANGFUSE_BASE_URL` | Optional | Defaults to `https://cloud.langfuse.com` |
-   | `DATABASE_URL` | Optional | Real Postgres DSN; if unset/unreachable, embedded `pgserver` is used |
+   | `DATABASE_URL` | Optional locally | Real Postgres DSN (Neon in production). If **unset**, embedded `pgserver` is used. If **set**, that DSN is always used (no silent fallback). Comment out any placeholder `DATABASE_URL` in an older `.env` so local runs use embedded Postgres. |
+   | `ALLOWED_ORIGINS` | Optional locally | Comma-separated CORS origins. Unset → `http://localhost:5173` and `http://127.0.0.1:5173`. |
 
    If the chosen provider's key is missing or still a placeholder, the workflow falls back to the other provider, then to offline heuristics — it never hard-fails on a missing key. Transient LLM errors retry with backoff, then degrade to the heuristic for that step.
 
@@ -78,13 +80,13 @@ Python 3.11+ and Node.js 18+ recommended.
 
 ## Running the backend + frontend
 
-Terminal 1 — API:
+Terminal 1 — API (port **8002**, matching the Vite proxy):
 
 ```bash
-uvicorn app.api.main:app --reload
+uvicorn app.api.main:app --reload --port 8002
 ```
 
-Health check: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health).
+Health check: [http://127.0.0.1:8002/health](http://127.0.0.1:8002/health).
 
 Terminal 2 — UI:
 
@@ -93,7 +95,7 @@ cd frontend
 npm run dev
 ```
 
-Open [http://127.0.0.1:5173](http://127.0.0.1:5173). Vite proxies `/investigations` to the API. Submit an issue description, watch status move through the graph, and browse history.
+Open [http://127.0.0.1:5173](http://127.0.0.1:5173). Vite proxies `/investigations` and `/health` to the API on port 8002. Leave `VITE_API_URL` unset locally so those relative paths keep using the proxy. Submit an issue description, watch status move through the graph, and browse history.
 
 ## Incident scenarios
 
@@ -151,6 +153,68 @@ Run against **Groq (`llama-3.3-70b-versatile`)**:
 | #4 Duplicate order_ids | Partial | 0.80 | needs_human_review |
 
 **Overall: 3/4 clean matches + 1 partial.**
+
+## Deployment
+
+Production layout:
+
+| Service | Role |
+|---|---|
+| **Render** | FastAPI backend (`uvicorn app.api.main:app --host 0.0.0.0 --port $PORT`) |
+| **Vercel** | React frontend (Vite build) |
+| **Neon** | PostgreSQL for the investigations table (`DATABASE_URL`) |
+
+The sandbox warehouse remains the local SQLite dataset under `app/sandbox_data/` (demo/eval data), not the Neon database. Neon holds investigation state only.
+
+### Backend environment variables (Render)
+
+| Variable | Required? | Purpose |
+|---|---|---|
+| `DATABASE_URL` | **Yes** | Neon Postgres connection string (include `sslmode=require`) |
+| `ALLOWED_ORIGINS` | **Yes** | Comma-separated frontend origins, e.g. `https://your-app.vercel.app` |
+| `GOOGLE_API_KEY` | Recommended | Gemini LLM; also Gemini embeddings when `EMBEDDING_PROVIDER=gemini` |
+| `GROQ_API_KEY` | Optional | Alternate LLM when `LLM_PROVIDER=groq` |
+| `LLM_PROVIDER` | Optional | `gemini` (default) or `groq` |
+| `EMBEDDING_PROVIDER` | Optional | `onnx` or `gemini` (keep consistent with how the Chroma index was built; re-ingest after changing) |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | Optional | Tracing |
+| `LANGFUSE_BASE_URL` | Optional | Defaults to `https://cloud.langfuse.com` |
+| `LANGFUSE_TRACING` | Optional | Set `false` to disable tracing |
+
+Start command on Render:
+
+```bash
+uvicorn app.api.main:app --host 0.0.0.0 --port $PORT
+```
+
+Build/install: `pip install -r requirements.txt` (includes `pgserver` for local fallback; it is not used when `DATABASE_URL` is set).
+
+### Frontend environment variables (Vercel)
+
+| Variable | Required? | Purpose |
+|---|---|---|
+| `VITE_API_URL` | **Yes** in production | Public Render backend URL, no trailing slash (e.g. `https://your-service.onrender.com`) |
+
+Locally, leave `VITE_API_URL` unset so `npm run dev` continues to use the Vite proxy to `http://127.0.0.1:8002`. The proxy only forwards API `fetch` calls; browser document navigations / hard refreshes of `/investigations/:id` still receive the SPA (`frontend/vite.config.ts`). On Vercel, `frontend/vercel.json` rewrites SPA routes (`/`, `/history`, `/investigations/:id`, …) to `index.html`.
+
+### Neon
+
+Create a Postgres database and copy its connection string into Render as `DATABASE_URL`. Prefer the pooled or direct Neon URI with SSL enabled.
+
+### First-deployment commands (run once against production)
+
+With production `DATABASE_URL` (and embedding keys if you want Gemini embeddings) available in the environment — e.g. a one-off Render shell, or locally pointing at Neon:
+
+```bash
+alembic upgrade head
+python -m app.retrieval.ingest
+```
+
+- `alembic upgrade head` creates/updates the investigations table on Neon.
+- `python -m app.retrieval.ingest` builds the Chroma index under `app/retrieval/chroma_db/` on the machine that runs it, using the embedding provider from `EMBEDDING_PROVIDER` / `GOOGLE_API_KEY`. On Render’s ephemeral disk, re-run ingest after a fresh deploy if the index is missing. Query always reuses the embedding function persisted on the collection, so the index and retrieval stay compatible.
+
+### Local-development variables
+
+See `.env.example` (backend) and `frontend/.env.example`. Typical local setup: leave `DATABASE_URL` and `ALLOWED_ORIGINS` unset; leave `VITE_API_URL` unset.
 
 ## Observability (Langfuse)
 

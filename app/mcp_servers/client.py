@@ -60,12 +60,17 @@ SERVER_MODULES = {
 # python-dotenv only sets a variable that isn't already in the
 # environment. So a key the parent deliberately cleared (tests/conftest.py
 # does this for every test) would come back to life from .env inside the
-# child, and the retrieval server would then embed its queries with
-# Gemini while the index was built with the local ONNX model -- a
-# mismatch that surfaces as garbage results rather than a clean error.
-# Passing the variable through as "" keeps it present-but-empty, which
-# blocks the .env fallback and reads as "not configured" everywhere.
-MIRRORED_ENV_VARS = ("GOOGLE_API_KEY", "GROQ_API_KEY", "LLM_PROVIDER")
+# child. Mirroring as "" keeps it present-but-empty, which blocks the
+# .env fallback. EMBEDDING_PROVIDER is mirrored the same way so a fresh
+# collection created in the child matches the parent's ingest config;
+# query of an existing collection already reuses Chroma's persisted
+# embedding function (see app/retrieval/ingest.get_collection).
+MIRRORED_ENV_VARS = (
+    "GOOGLE_API_KEY",
+    "GROQ_API_KEY",
+    "LLM_PROVIDER",
+    "EMBEDDING_PROVIDER",
+)
 
 # Generous, because a cold start can include loading the local embedding
 # model, and a call can include an embedding round-trip to a remote API.

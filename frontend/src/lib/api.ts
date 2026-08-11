@@ -35,8 +35,21 @@ export type InvestigationCreateResponse = {
   status: InvestigationStatus;
 };
 
+/**
+ * Build-time backend base URL (Vercel / production).
+ * When unset, relative paths keep working through the Vite dev proxy.
+ */
+const API_BASE = (import.meta.env.VITE_API_URL as string | undefined)?.replace(
+  /\/$/,
+  "",
+) ?? "";
+
+function apiUrl(path: string): string {
+  return `${API_BASE}${path}`;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
+  const response = await fetch(apiUrl(path), {
     headers: {
       "Content-Type": "application/json",
       ...(init?.headers ?? {}),
