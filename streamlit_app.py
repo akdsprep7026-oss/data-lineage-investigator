@@ -23,6 +23,8 @@ from app.streamlit_support import (
     POLL_INTERVAL_SECONDS,
     RETRIEVAL_INGEST_COMMAND,
     SANDBOX_SEED_COMMAND,
+    SIDEBAR_NAV_KEY,
+    apply_pending_sidebar_nav,
     cloud_database_url_error,
     ensure_streamlit_startup_once,
     format_confidence_pct,
@@ -33,6 +35,7 @@ from app.streamlit_support import (
     is_in_progress,
     is_retrieval_ready,
     is_sandbox_warehouse_ready,
+    queue_sidebar_nav,
     rank_hypotheses,
     retrieval_status_label,
     root_cause_placeholder,
@@ -64,10 +67,12 @@ st.set_page_config(
 
 
 def _init_session_state() -> None:
-    if "sidebar_nav" not in st.session_state:
-        st.session_state.sidebar_nav = NAV_NEW
+    # Apply queued nav before st.radio(key=SIDEBAR_NAV_KEY) is created.
+    apply_pending_sidebar_nav(st.session_state)
+    if SIDEBAR_NAV_KEY not in st.session_state:
+        st.session_state[SIDEBAR_NAV_KEY] = NAV_NEW
     if "_prev_sidebar_nav" not in st.session_state:
-        st.session_state._prev_sidebar_nav = st.session_state.sidebar_nav
+        st.session_state._prev_sidebar_nav = st.session_state[SIDEBAR_NAV_KEY]
     # Prefer current_investigation_id (S3); migrate any S2 active id once.
     if "current_investigation_id" not in st.session_state:
         legacy = st.session_state.get("active_investigation_id")
@@ -87,16 +92,15 @@ def _open_detail(investigation_id: str) -> None:
 
 def _back_to_history() -> None:
     st.session_state.current_investigation_id = None
-    st.session_state.sidebar_nav = NAV_HISTORY
-    st.session_state._prev_sidebar_nav = NAV_HISTORY
+    # Queue only — radio(key=sidebar_nav) already exists in this run.
+    queue_sidebar_nav(st.session_state, NAV_HISTORY)
     st.session_state.last_error = None
     st.rerun()
 
 
 def _go_new_investigation() -> None:
     st.session_state.current_investigation_id = None
-    st.session_state.sidebar_nav = NAV_NEW
-    st.session_state._prev_sidebar_nav = NAV_NEW
+    queue_sidebar_nav(st.session_state, NAV_NEW)
     st.session_state.last_error = None
     st.rerun()
 
@@ -125,8 +129,9 @@ def _start_new_investigation(issue_description: str) -> None:
 
     investigation_id = str(investigation.id)
     st.session_state.current_investigation_id = investigation_id
-    st.session_state.sidebar_nav = NAV_NEW
-    st.session_state._prev_sidebar_nav = NAV_NEW
+    # Do not assign session_state.sidebar_nav here: st.radio already owns
+    # that key in this run (sidebar rendered first). Queue for next run.
+    queue_sidebar_nav(st.session_state, NAV_NEW)
     st.session_state.last_error = None
 
     # Worker starts only here — never when opening History/Detail.
@@ -191,12 +196,12 @@ def _render_sidebar() -> None:
         st.radio(
             "Navigate",
             options=[NAV_NEW, NAV_HISTORY],
-            key="sidebar_nav",
+            key=SIDEBAR_NAV_KEY,
             label_visibility="collapsed",
         )
         # Only clear detail when the user actually changes the sidebar page.
         previous = st.session_state._prev_sidebar_nav
-        current = st.session_state.sidebar_nav
+        current = st.session_state[SIDEBAR_NAV_KEY]
         if previous != current:
             st.session_state.current_investigation_id = None
             st.session_state.last_error = None
@@ -463,7 +468,7 @@ def main() -> None:
     # Detail takes precedence when an investigation is selected.
     if st.session_state.current_investigation_id:
         _render_detail_page()
-    elif st.session_state.sidebar_nav == NAV_HISTORY:
+    elif st.session_state[SIDEBAR_NAV_KEY] == NAV_HISTORY:
         _render_history()
     else:
         _render_new_investigation_form()

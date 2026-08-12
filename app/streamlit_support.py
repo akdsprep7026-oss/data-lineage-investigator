@@ -10,6 +10,7 @@ import logging
 import os
 import threading
 from collections import defaultdict
+from collections.abc import MutableMapping
 from typing import Any, Iterable, Optional
 
 from app.db.investigations import reap_stale_investigations
@@ -39,6 +40,9 @@ IN_PROGRESS_STATUSES = frozenset(
 )
 
 POLL_INTERVAL_SECONDS = 2.0
+PENDING_SIDEBAR_NAV_KEY = "_pending_sidebar_nav"
+SIDEBAR_NAV_KEY = "sidebar_nav"
+PREV_SIDEBAR_NAV_KEY = "_prev_sidebar_nav"
 
 _reaper_lock = threading.Lock()
 _reaper_ran = False
@@ -46,6 +50,40 @@ _reaper_ran = False
 _bootstrap_lock = threading.Lock()
 _bootstrap_ran = False
 _bootstrap_result: Optional[dict[str, str]] = None
+
+
+def queue_sidebar_nav(
+    session_state: MutableMapping[str, Any],
+    nav: str,
+    *,
+    pending_key: str = PENDING_SIDEBAR_NAV_KEY,
+) -> None:
+    """Queue a sidebar radio value for the *next* script run.
+
+    Streamlit forbids assigning ``session_state[widget_key]`` after the
+    widget that owns ``widget_key`` has already been instantiated in the
+    current run. Button handlers must queue navigation, then ``st.rerun()``.
+    """
+    session_state[pending_key] = nav
+
+
+def apply_pending_sidebar_nav(
+    session_state: MutableMapping[str, Any],
+    *,
+    pending_key: str = PENDING_SIDEBAR_NAV_KEY,
+    nav_key: str = SIDEBAR_NAV_KEY,
+    prev_key: str = PREV_SIDEBAR_NAV_KEY,
+) -> Optional[str]:
+    """Apply queued sidebar navigation *before* ``st.radio`` is created.
+
+    Returns the applied nav label, or None when nothing was pending.
+    """
+    pending = session_state.pop(pending_key, None)
+    if pending is None:
+        return None
+    session_state[nav_key] = pending
+    session_state[prev_key] = pending
+    return str(pending)
 
 
 def ensure_startup_reaper_once() -> None:

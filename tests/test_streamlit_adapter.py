@@ -8,7 +8,10 @@ from uuid import uuid4
 
 from app.db.models import InvestigationStatus
 from app.streamlit_support import (
+    PENDING_SIDEBAR_NAV_KEY,
     RETRIEVAL_INGEST_COMMAND,
+    SIDEBAR_NAV_KEY,
+    apply_pending_sidebar_nav,
     ensure_startup_reaper_once,
     format_confidence_pct,
     group_evidence_by_source,
@@ -16,6 +19,7 @@ from app.streamlit_support import (
     investigation_row_to_snapshot,
     is_in_progress,
     is_retrieval_ready,
+    queue_sidebar_nav,
     rank_hypotheses,
     reset_startup_reaper_for_tests,
     retrieval_status_label,
@@ -34,6 +38,23 @@ def test_should_start_worker_blocks_duplicates():
     assert should_start_worker("abc", []) is True
     assert should_start_worker("abc", {"abc"}) is False
     assert should_start_worker("abc", ["xyz"]) is True
+
+
+def test_queue_sidebar_nav_does_not_mutate_widget_key_until_applied():
+    """Regression: button handlers must not assign sidebar_nav after radio exists.
+
+    Streamlit raises StreamlitAPIException if session_state[widget_key] is
+    written after the widget that owns that key has been instantiated.
+    """
+    state: dict = {SIDEBAR_NAV_KEY: "New Investigation", "_prev_sidebar_nav": "New Investigation"}
+    queue_sidebar_nav(state, "History")
+    assert state[SIDEBAR_NAV_KEY] == "New Investigation"
+    assert state[PENDING_SIDEBAR_NAV_KEY] == "History"
+    assert apply_pending_sidebar_nav(state) == "History"
+    assert state[SIDEBAR_NAV_KEY] == "History"
+    assert state["_prev_sidebar_nav"] == "History"
+    assert PENDING_SIDEBAR_NAV_KEY not in state
+    assert apply_pending_sidebar_nav(state) is None
 
 
 def test_is_in_progress_matches_existing_statuses():
