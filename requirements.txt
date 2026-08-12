@@ -1,5 +1,7 @@
 fastapi
 uvicorn[standard]
+# Optional Streamlit UI path (architecture B): streamlit run streamlit_app.py
+streamlit
 langgraph
 langchain
 # Observability for the investigation graph (Step 9). Reads

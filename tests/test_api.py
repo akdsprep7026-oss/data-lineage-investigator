@@ -101,7 +101,7 @@ def test_background_exception_marks_needs_human_review_and_preserves_prior_work(
     )
 
     with patch(
-        "app.api.main.run_investigation",
+        "app.investigation_runner.run_investigation",
         side_effect=RuntimeError("simulated graph crash"),
     ):
         _run_investigation_background(
@@ -177,7 +177,9 @@ def test_successful_background_run_keeps_human_review_terminal_status():
         )
         return result
 
-    with patch("app.api.main.run_investigation", side_effect=_fake_run):
+    with patch(
+        "app.investigation_runner.run_investigation", side_effect=_fake_run
+    ):
         _run_investigation_background(
             investigation.issue_description, str(investigation.id)
         )
@@ -202,7 +204,7 @@ def test_background_run_forces_terminal_when_graph_returns_non_terminal_status()
     )
 
     with patch(
-        "app.api.main.run_investigation",
+        "app.investigation_runner.run_investigation",
         return_value={
             "status": InvestigationStatus.INVESTIGATING.value,
             "retry_count": 1,
@@ -252,7 +254,9 @@ def test_low_confidence_background_run_ends_in_needs_human_review():
         )
         return result
 
-    with patch("app.api.main.run_investigation", side_effect=_fake_run):
+    with patch(
+        "app.investigation_runner.run_investigation", side_effect=_fake_run
+    ):
         _run_investigation_background(
             investigation.issue_description, str(investigation.id)
         )

@@ -10,3 +10,5 @@ chroma_db/
 .pgdata/
 app/db/.pgdata/
 app/graph/eval_results.json
+# Never commit Streamlit Cloud / local secrets
+.streamlit/secrets.toml

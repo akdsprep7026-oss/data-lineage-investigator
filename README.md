@@ -97,6 +97,107 @@ npm run dev
 
 Open [http://127.0.0.1:5173](http://127.0.0.1:5173). Vite proxies `/investigations` and `/health` to the API on port 8002. Leave `VITE_API_URL` unset locally so those relative paths keep using the proxy. Submit an issue description, watch status move through the graph, and browse history.
 
+## Streamlit
+
+The Streamlit UI is an alternate local entry point over the **same** investigation engine (`create_investigation` → background `run_investigation` → Postgres + LangGraph + retrieval/MCP). It does **not** call FastAPI over HTTP.
+
+Python **3.11+** recommended. Install deps once (`pip install -r requirements.txt`; includes `streamlit`).
+
+### Prepare the retrieval index
+
+Chroma under `app/retrieval/chroma_db/` is gitignored. Build it once from sandbox SQL models / pipeline / dashboard metadata:
+
+```bash
+python -m app.retrieval.ingest
+```
+
+Prefer `EMBEDDING_PROVIDER=onnx` for a local, key-free index. After changing embedding provider, re-run ingest. The Streamlit sidebar shows **Retrieval index: Ready / Not initialized** and will not rebuild the index on every rerun.
+
+### Environment
+
+Copy `.env.example` → `.env`. Streamlit uses the same names as the rest of the app:
+
+| Variable | Required? | Purpose |
+|---|---|---|
+| `GOOGLE_API_KEY` | Optional | Gemini LLM (default); Gemini embeddings only if `EMBEDDING_PROVIDER=gemini` |
+| `GROQ_API_KEY` | Optional | Groq LLM when selected / as fallback when Gemini is unavailable |
+| `LLM_PROVIDER` | Optional | `gemini` (default) or `groq` |
+| `GEMINI_MODEL` / `GROQ_MODEL` | Optional | Model overrides |
+| `EMBEDDING_PROVIDER` | Optional | `onnx` or `gemini` (must match how the Chroma index was built) |
+| `DATABASE_URL` | Optional locally | Unset → embedded Postgres under `app/db/.pgdata`. Set → that DSN only (no silent fallback). |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | Optional | Tracing (`app/graph/tracing.py`); placeholders or missing keys keep runs offline |
+| `LANGFUSE_BASE_URL` | Optional | Defaults to `https://cloud.langfuse.com` |
+| `LANGFUSE_TRACING` | Optional | Set `false` to disable even when keys are present |
+| `STALE_INVESTIGATION_MINUTES` | Optional | Startup reaper threshold (default 30) |
+
+Not required for Streamlit: `ALLOWED_ORIGINS`, `VITE_API_URL`.
+
+If LLM keys are missing or still placeholders, sql/root-cause steps use the existing offline heuristics — the app does not hard-fail.
+
+### Start
+
+```bash
+streamlit run streamlit_app.py
+```
+
+On process start (once per Streamlit process, **not** every rerun), the app:
+
+1. Validates Cloud-required config when Community Cloud is detected (`STREAMLIT_CLOUD_DEPLOY=true` or the conventional `appuser` runtime).
+2. Calls `reap_stale_investigations()` (same idea as FastAPI lifespan).
+3. Seeds `warehouse.db` **only if** the sandbox warehouse is missing/uninitialized (`python -m app.sandbox_data.seed`).
+4. Builds the Chroma index **only if** retrieval is not ready (`python -m app.retrieval.ingest` via existing `ingest()`).
+
+Use **New Investigation** to create a run, watch status while `pending` / `investigating`, then open **History** / detail for root cause, hypotheses, and evidence.
+
+### Streamlit Community Cloud (intended deployment)
+
+**Entry point:** `streamlit_app.py`  
+**Runtime pin:** `runtime.txt` (`python-3.11`)  
+**Config:** `.streamlit/config.toml` (headless + disable usage stats)
+
+Architecture:
+
+```
+Streamlit Community Cloud
+  → streamlit_app.py
+  → existing service/graph layer (LangGraph, MCP, retrieval, sandbox, LLM, Langfuse)
+  → external PostgreSQL via DATABASE_URL
+```
+
+Rebuildable local assets (ephemeral Cloud filesystem):
+
+| Asset | Bootstrap |
+|---|---|
+| Sandbox SQLite `warehouse.db` | Seed once when missing (`app.sandbox_data.seed`) |
+| Chroma under `app/retrieval/chroma_db/` | Ingest once when not ready (`app.retrieval.ingest`) |
+
+**Render and Vercel are not required** for this deployment path. The FastAPI + React stack remains in the repo for local/alternate use; it is not the Community Cloud path.
+
+**External PostgreSQL is required** for durable investigation history. Embedded `pgserver` is for **local development only** when `DATABASE_URL` is unset — it is **not** durable storage on Community Cloud. Keep the DSN provider-agnostic: set `DATABASE_URL` to any Postgres URL (do not hard-code a vendor). Before first useful Cloud traffic, run migrations once against that database:
+
+```bash
+alembic upgrade head
+```
+
+**Do not commit Streamlit secrets.** Never add `.streamlit/secrets.toml` to git (it is gitignored). Configure secrets in the Streamlit Cloud dashboard. Root-level secret keys are exposed as environment variables with the **same names** the app already reads via `os.getenv` — no second config system.
+
+| Secret / env name | Required on Cloud? | Purpose |
+|---|---|---|
+| `DATABASE_URL` | **Yes** | External Postgres for investigations |
+| `STREAMLIT_CLOUD_DEPLOY` | Recommended (`true`) | Explicit Cloud detection so embedded pgserver is never used silently |
+| `GOOGLE_API_KEY` | Recommended | Gemini LLM (default) |
+| `GROQ_API_KEY` | Optional | Groq when selected / fallback |
+| `LLM_PROVIDER` | Optional | `gemini` (default) or `groq` |
+| `GEMINI_MODEL` / `GROQ_MODEL` | Optional | Model overrides |
+| `EMBEDDING_PROVIDER` | **Recommended: `onnx`** | Avoids Gemini embedding quota on Cloud; ONNX is already supported via Chroma’s bundled MiniLM |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | Optional | Tracing |
+| `LANGFUSE_BASE_URL` | Optional | Defaults to `https://cloud.langfuse.com` |
+| `LANGFUSE_TRACING` | Optional | Set `false` to disable |
+| `LANGFUSE_PUBLIC_TRACES` | Optional | Shareable dashboard links |
+| `STALE_INVESTIGATION_MINUTES` | Optional | Startup reaper threshold (default 30) |
+
+MCP stdio servers continue to launch as `sys.executable -m app.mcp_servers.*` from the project root — no MCP redesign for Community Cloud.
+
 ## Incident scenarios
 
 Four toggleable bugs live under `app/sandbox_data/incidents/`. Applying one always resets to a clean baseline first, so only one incident is active at a time.
@@ -156,22 +257,41 @@ Run against **Groq (`llama-3.3-70b-versatile`)**:
 
 ## Deployment
 
-Production layout:
+### Intended path: Streamlit Community Cloud
 
-| Service | Role |
+See **[Streamlit Community Cloud (intended deployment)](#streamlit-community-cloud-intended-deployment)** under [Streamlit](#streamlit). Summary:
+
+- Deploy **`streamlit_app.py`** (not FastAPI/React).
+- Provide an **external PostgreSQL** `DATABASE_URL` via Streamlit Secrets (provider-agnostic).
+- Prefer **`EMBEDDING_PROVIDER=onnx`** on Cloud.
+- Warehouse seed + Chroma ingest run **once per process** when assets are missing — never on every Streamlit rerun.
+- **Render / Vercel are not required.** Embedded `pgserver` is local-only, not durable Community Cloud storage.
+- **Do not commit** `.streamlit/secrets.toml`.
+
+Run once against the external Postgres before relying on Cloud history:
+
+```bash
+alembic upgrade head
+```
+
+### Alternate path: FastAPI + React (still in repo)
+
+The FastAPI API and React frontend remain fully supported for local development and optional separate hosting. They are **not** the Streamlit Community Cloud deployment path.
+
+| Service (optional) | Role |
 |---|---|
-| **Render** | FastAPI backend (`uvicorn app.api.main:app --host 0.0.0.0 --port $PORT`) |
-| **Vercel** | React frontend (Vite build) |
-| **Neon** | PostgreSQL for the investigations table (`DATABASE_URL`) |
+| FastAPI backend | `uvicorn app.api.main:app --host 0.0.0.0 --port $PORT` |
+| React frontend | Vite build (`frontend/`) |
+| PostgreSQL | Investigations table via `DATABASE_URL` |
 
-The sandbox warehouse remains the local SQLite dataset under `app/sandbox_data/` (demo/eval data), not the Neon database. Neon holds investigation state only.
+The sandbox warehouse remains the SQLite dataset under `app/sandbox_data/` (demo/eval data), not the investigations Postgres database.
 
-### Backend environment variables (Render)
+#### Backend environment variables (FastAPI hosting)
 
 | Variable | Required? | Purpose |
 |---|---|---|
-| `DATABASE_URL` | **Yes** | Neon Postgres connection string (include `sslmode=require`) |
-| `ALLOWED_ORIGINS` | **Yes** | Comma-separated frontend origins, e.g. `https://your-app.vercel.app` |
+| `DATABASE_URL` | **Yes** in durable hosting | Postgres connection string (include `sslmode=require` when the host requires SSL) |
+| `ALLOWED_ORIGINS` | **Yes** with a browser frontend | Comma-separated frontend origins |
 | `GOOGLE_API_KEY` | Recommended | Gemini LLM; also Gemini embeddings when `EMBEDDING_PROVIDER=gemini` |
 | `GROQ_API_KEY` | Optional | Alternate LLM when `LLM_PROVIDER=groq` |
 | `LLM_PROVIDER` | Optional | `gemini` (default) or `groq` |
@@ -181,7 +301,7 @@ The sandbox warehouse remains the local SQLite dataset under `app/sandbox_data/`
 | `LANGFUSE_TRACING` | Optional | Set `false` to disable tracing |
 | `STALE_INVESTIGATION_MINUTES` | Optional | Minutes without `updated_at` progress before startup reaper marks pending/investigating rows `needs_human_review` (default **30**) |
 
-Start command on Render:
+Example FastAPI start:
 
 ```bash
 uvicorn app.api.main:app --host 0.0.0.0 --port $PORT
@@ -189,33 +309,29 @@ uvicorn app.api.main:app --host 0.0.0.0 --port $PORT
 
 Build/install: `pip install -r requirements.txt` (includes `pgserver` for local fallback; it is not used when `DATABASE_URL` is set).
 
-### Frontend environment variables (Vercel)
+#### Frontend environment variables (React hosting)
 
 | Variable | Required? | Purpose |
 |---|---|---|
-| `VITE_API_URL` | **Yes** in production | Public Render backend URL, no trailing slash (e.g. `https://your-service.onrender.com`) |
+| `VITE_API_URL` | **Yes** when the UI is hosted separately from the API | Public FastAPI base URL, no trailing slash |
 
-Locally, leave `VITE_API_URL` unset so `npm run dev` continues to use the Vite proxy to `http://127.0.0.1:8002`. The proxy only forwards API `fetch` calls; browser document navigations / hard refreshes of `/investigations/:id` still receive the SPA (`frontend/vite.config.ts`). On Vercel, `frontend/vercel.json` rewrites SPA routes (`/`, `/history`, `/investigations/:id`, …) to `index.html`.
+Locally, leave `VITE_API_URL` unset so `npm run dev` continues to use the Vite proxy to `http://127.0.0.1:8002`. The proxy only forwards API `fetch` calls; browser document navigations / hard refreshes of `/investigations/:id` still receive the SPA (`frontend/vite.config.ts`). `frontend/vercel.json` rewrites SPA routes (`/`, `/history`, `/investigations/:id`, …) to `index.html` if you host on Vercel.
 
-### Neon
+#### First-deployment commands (investigations DB + optional local index)
 
-Create a Postgres database and copy its connection string into Render as `DATABASE_URL`. Prefer the pooled or direct Neon URI with SSL enabled.
-
-### First-deployment commands (run once against production)
-
-With production `DATABASE_URL` (and embedding keys if you want Gemini embeddings) available in the environment — e.g. a one-off Render shell, or locally pointing at Neon:
+With production `DATABASE_URL` available in the environment:
 
 ```bash
 alembic upgrade head
 python -m app.retrieval.ingest
 ```
 
-- `alembic upgrade head` creates/updates the investigations table on Neon.
-- `python -m app.retrieval.ingest` builds the Chroma index under `app/retrieval/chroma_db/` on the machine that runs it, using the embedding provider from `EMBEDDING_PROVIDER` / `GOOGLE_API_KEY`. On Render’s ephemeral disk, re-run ingest after a fresh deploy if the index is missing. Query always reuses the embedding function persisted on the collection, so the index and retrieval stay compatible.
+- `alembic upgrade head` creates/updates the investigations table on the external Postgres.
+- `python -m app.retrieval.ingest` builds Chroma under `app/retrieval/chroma_db/` on the machine that runs it. On ephemeral filesystems, re-run (or rely on Streamlit’s once-per-process bootstrap) if the index is missing. Query always reuses the embedding function persisted on the collection.
 
 ### Local-development variables
 
-See `.env.example` (backend) and `frontend/.env.example`. Typical local setup: leave `DATABASE_URL` and `ALLOWED_ORIGINS` unset; leave `VITE_API_URL` unset.
+See `.env.example` (backend) and `frontend/.env.example`. Typical local Streamlit/FastAPI setup: leave `DATABASE_URL` and `ALLOWED_ORIGINS` unset; leave `VITE_API_URL` unset.
 
 ## Observability (Langfuse)
 
@@ -238,14 +354,19 @@ python -m app.mcp_servers.retrieval_server
 ## Project structure
 
 ```
+streamlit_app.py  # Intended Community Cloud / local Streamlit entry point
+runtime.txt       # Python 3.11 pin for Streamlit Community Cloud
+.streamlit/       # Community Cloud config (do not commit secrets.toml)
 app/
-  api/            # FastAPI (health + investigations)
-  db/             # Investigations table + embedded Postgres fallback
+  api/            # FastAPI (health + investigations; alternate path)
+  db/             # Investigations table + embedded Postgres fallback (local)
   graph/          # LangGraph workflow, nodes, LLM, tracing, smoke/eval helpers
   mcp_servers/    # MCP Postgres + retrieval servers and client
   retrieval/      # Chroma ingest / retrieve
   sandbox_data/   # SQLite warehouse, SQL models, incident scenarios
-frontend/         # Vite + React + TypeScript UI
+  streamlit_support.py
+  investigation_runner.py
+frontend/         # Vite + React + TypeScript UI (alternate path)
 alembic/          # Migrations for the investigations DB
 tests/            # Pytest suite + run_eval.py (Step 11 harness)
 eval_report.md    # Scored evaluation report (portfolio artifact)
