@@ -5,11 +5,14 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 from app.streamlit_support import (
+    SANDBOX_DEBUG_CLEAN,
+    apply_sandbox_debug_selection,
     cloud_database_url_error,
     ensure_retrieval_index,
     ensure_runtime_assets_once,
     ensure_sandbox_warehouse,
     ensure_streamlit_startup_once,
+    is_sandbox_debug_enabled,
     is_streamlit_cloud_runtime,
     reset_runtime_bootstrap_for_tests,
     reset_startup_reaper_for_tests,
@@ -146,3 +149,68 @@ def test_ensure_streamlit_startup_once_orders_reaper_then_assets(monkeypatch):
     assert result["warehouse"] == "ready"
     reset_startup_reaper_for_tests()
     reset_runtime_bootstrap_for_tests()
+
+
+def test_sandbox_debug_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("ENABLE_SANDBOX_DEBUG", raising=False)
+    assert is_sandbox_debug_enabled() is False
+    monkeypatch.setenv("ENABLE_SANDBOX_DEBUG", "false")
+    assert is_sandbox_debug_enabled() is False
+    monkeypatch.setenv("ENABLE_SANDBOX_DEBUG", "true")
+    assert is_sandbox_debug_enabled() is True
+
+
+def test_apply_sandbox_debug_selection_clean_resets_and_ingests(monkeypatch):
+    reset = MagicMock()
+    ingest = MagicMock(return_value=7)
+    counts = {
+        "raw_customers": 40,
+        "raw_orders": 200,
+        "stg_orders_cleaned": 167,
+        "fct_daily_revenue": 54,
+    }
+    monkeypatch.setattr(
+        "app.sandbox_data.incidents.common.reset_to_clean_baseline", reset
+    )
+    monkeypatch.setattr("app.retrieval.ingest.ingest", ingest)
+    monkeypatch.setattr(
+        "app.streamlit_support.sandbox_warehouse_row_counts", lambda: counts
+    )
+
+    result = apply_sandbox_debug_selection(SANDBOX_DEBUG_CLEAN)
+
+    assert result["ok"] is True
+    assert "clean baseline" in result["message"].lower()
+    assert result["docs_ingested"] == 7
+    assert result["counts"] == counts
+    reset.assert_called_once_with()
+    ingest.assert_called_once_with(reset=True)
+
+
+def test_apply_sandbox_debug_selection_applies_incident(monkeypatch):
+    apply_fn = MagicMock()
+    incident_mod = MagicMock(apply=apply_fn)
+    ingest = MagicMock(return_value=7)
+    monkeypatch.setattr(
+        "app.sandbox_data.incidents.manage.INCIDENTS",
+        {"1": incident_mod, "2": MagicMock(), "3": MagicMock(), "4": MagicMock()},
+    )
+    monkeypatch.setattr("app.retrieval.ingest.ingest", ingest)
+    monkeypatch.setattr(
+        "app.streamlit_support.sandbox_warehouse_row_counts",
+        lambda: {"raw_orders": 205},
+    )
+
+    result = apply_sandbox_debug_selection("1")
+
+    assert result["ok"] is True
+    assert "incident 1" in result["message"].lower()
+    apply_fn.assert_called_once_with()
+    ingest.assert_called_once_with(reset=True)
+
+
+def test_apply_sandbox_debug_selection_rejects_unknown():
+    result = apply_sandbox_debug_selection("99")
+    assert result["ok"] is False
+    assert "unknown" in result["message"].lower()
+    assert result["docs_ingested"] == 0

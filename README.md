@@ -185,6 +185,7 @@ alembic upgrade head
 |---|---|---|
 | `DATABASE_URL` | **Yes** | External Postgres for investigations |
 | `STREAMLIT_CLOUD_DEPLOY` | Recommended (`true`) | Explicit Cloud detection so embedded pgserver is never used silently |
+| `ENABLE_SANDBOX_DEBUG` | Optional (`true` to enable) | Shows **Debug: Sandbox Control** in the sidebar so you can apply incidents 1–4 (or clean baseline) on the **live** process sandbox + re-ingest Chroma |
 | `GOOGLE_API_KEY` | Recommended | Gemini LLM (default) |
 | `GROQ_API_KEY` | Optional | Groq when selected / fallback |
 | `LLM_PROVIDER` | Optional | `gemini` (default) or `groq` |
@@ -265,8 +266,19 @@ See **[Streamlit Community Cloud (intended deployment)](#streamlit-community-clo
 - Provide an **external PostgreSQL** `DATABASE_URL` via Streamlit Secrets (provider-agnostic).
 - Prefer **`EMBEDDING_PROVIDER=onnx`** on Cloud.
 - Warehouse seed + Chroma ingest run **once per process** when assets are missing — never on every Streamlit rerun.
+- **`DATABASE_URL` covers investigation state only**, not the sandbox warehouse. Each deployed instance has its own independent `warehouse.db` / SQL models / `chroma_db` on that process filesystem. To put a live Cloud app onto incident 1–4 (or clean baseline), set `ENABLE_SANDBOX_DEBUG=true` in Secrets and use **Debug: Sandbox Control** in the sidebar (off by default).
 - **Render / Vercel are not required.** Embedded `pgserver` is local-only, not durable Community Cloud storage.
 - **Do not commit** `.streamlit/secrets.toml`.
+
+#### Sandbox vs investigations database
+
+| Store | Where | Purpose |
+|---|---|---|
+| Investigations Postgres | `DATABASE_URL` (Neon/etc. via Secrets) | Durable investigation history / status |
+| Sandbox warehouse | SQLite `app/sandbox_data/warehouse.db` + SQL models / `pipeline_jobs.json` **on the running instance** | Demo “company” data the graph inspects |
+| Retrieval index | `app/retrieval/chroma_db/` **on the running instance** | Lineage search over those sandbox files |
+
+Applying an incident locally does **not** change a Community Cloud instance. Use the debug sidebar on that deployment (or re-seed/re-ingest in that environment) so validators see the INNER JOIN / stale job / etc. that you intend to test.
 
 Run once against the external Postgres before relying on Cloud history:
 

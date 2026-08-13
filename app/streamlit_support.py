@@ -23,6 +23,16 @@ logger = logging.getLogger(__name__)
 PLACEHOLDER_PREFIX = "your-"
 RETRIEVAL_INGEST_COMMAND = "python -m app.retrieval.ingest"
 SANDBOX_SEED_COMMAND = "python -m app.sandbox_data.seed"
+# Opt-in Streamlit sidebar panel for applying sandbox incidents on a live
+# process (local or Community Cloud). Off unless ENABLE_SANDBOX_DEBUG=true.
+SANDBOX_DEBUG_CLEAN = "clean baseline"
+SANDBOX_DEBUG_OPTIONS: tuple[tuple[str, str], ...] = (
+    (SANDBOX_DEBUG_CLEAN, "clean baseline"),
+    ("1", "1 — join bug"),
+    ("2", "2 — stale pipeline"),
+    ("3", "3 — schema change"),
+    ("4", "4 — duplicate rows"),
+)
 REQUIRED_WAREHOUSE_TABLES = frozenset(
     {
         "raw_customers",
@@ -386,6 +396,75 @@ def cloud_database_url_error() -> Optional[str]:
         "development only and is not durable on Community Cloud. Set "
         "DATABASE_URL (and STREAMLIT_CLOUD_DEPLOY=true) in Streamlit Secrets."
     )
+
+
+def is_sandbox_debug_enabled() -> bool:
+    """True when ENABLE_SANDBOX_DEBUG is set (Streamlit Secrets / env).
+
+    Default is off so production Cloud UIs stay free of incident controls
+    unless explicitly enabled.
+    """
+    flag = (os.getenv("ENABLE_SANDBOX_DEBUG") or "").strip().lower()
+    return flag in {"1", "true", "yes", "on"}
+
+
+def sandbox_warehouse_row_counts() -> dict[str, int]:
+    """Row counts for the sandbox SQLite warehouse in this process."""
+    from sqlalchemy import text
+
+    from app.sandbox_data.models import get_engine
+
+    engine = get_engine()
+    tables = (
+        "raw_customers",
+        "raw_orders",
+        "stg_orders_cleaned",
+        "fct_daily_revenue",
+    )
+    with engine.connect() as connection:
+        return {
+            table: int(connection.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar() or 0)
+            for table in tables
+        }
+
+
+def apply_sandbox_debug_selection(selection_key: str) -> dict[str, Any]:
+    """Apply clean baseline or incident 1–4, then re-ingest Chroma.
+
+    Operates on this process's ``warehouse.db`` / SQL models / ``chroma_db``
+    paths (the same files agents and validators read). Does not touch
+    investigations Postgres (``DATABASE_URL``).
+    """
+    from app.retrieval.ingest import ingest
+    from app.sandbox_data.incidents import common
+    from app.sandbox_data.incidents.manage import INCIDENTS
+
+    key = (selection_key or "").strip()
+    if key == SANDBOX_DEBUG_CLEAN or key.lower() == "clean baseline":
+        common.reset_to_clean_baseline()
+        action = "Reset to clean baseline."
+    elif key in INCIDENTS:
+        INCIDENTS[key].apply()
+        action = f"Applied incident {key}."
+    else:
+        return {
+            "ok": False,
+            "message": f"Unknown sandbox selection: {selection_key!r}",
+            "counts": {},
+            "docs_ingested": 0,
+        }
+
+    docs = ingest(reset=True)
+    counts = sandbox_warehouse_row_counts()
+    return {
+        "ok": True,
+        "message": (
+            f"{action} Re-ingested {docs} retrieval document(s) so Chroma "
+            "matches this process's sandbox files."
+        ),
+        "counts": counts,
+        "docs_ingested": docs,
+    }
 
 
 def is_sandbox_warehouse_ready() -> bool:

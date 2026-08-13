@@ -22,9 +22,11 @@ from app.db.investigations import (
 from app.streamlit_support import (
     POLL_INTERVAL_SECONDS,
     RETRIEVAL_INGEST_COMMAND,
+    SANDBOX_DEBUG_OPTIONS,
     SANDBOX_SEED_COMMAND,
     SIDEBAR_NAV_KEY,
     apply_pending_sidebar_nav,
+    apply_sandbox_debug_selection,
     cloud_database_url_error,
     ensure_streamlit_startup_once,
     format_confidence_pct,
@@ -34,6 +36,7 @@ from app.streamlit_support import (
     investigation_row_to_snapshot,
     is_in_progress,
     is_retrieval_ready,
+    is_sandbox_debug_enabled,
     is_sandbox_warehouse_ready,
     queue_sidebar_nav,
     rank_hypotheses,
@@ -208,6 +211,47 @@ def _render_sidebar() -> None:
             st.session_state._prev_sidebar_nav = current
         st.divider()
         _render_runtime_status()
+        _render_sandbox_debug()
+
+
+def _render_sandbox_debug() -> None:
+    """Opt-in incident apply/reset for the current process sandbox only."""
+    if not is_sandbox_debug_enabled():
+        return
+
+    st.divider()
+    st.subheader("Debug: Sandbox Control")
+    st.caption(
+        "Changes **this process's** `warehouse.db`, SQL models, and "
+        "`chroma_db` — not investigations Postgres (`DATABASE_URL`). "
+        "Use this to put a live Cloud instance onto incident 1–4."
+    )
+    labels = [label for _key, label in SANDBOX_DEBUG_OPTIONS]
+    label_to_key = {label: key for key, label in SANDBOX_DEBUG_OPTIONS}
+    choice_label = st.selectbox(
+        "Sandbox incident",
+        options=labels,
+        key="sandbox_debug_incident_choice",
+    )
+    if st.button("Apply sandbox state", key="sandbox_debug_apply"):
+        selection_key = label_to_key[choice_label]
+        try:
+            with st.spinner("Applying sandbox state and re-ingesting retrieval…"):
+                result = apply_sandbox_debug_selection(selection_key)
+        except Exception as exc:  # noqa: BLE001 - surface to operator UI
+            logger.exception("Sandbox debug apply failed")
+            st.error(f"Sandbox update failed: {type(exc).__name__}: {exc}")
+            return
+
+        if result["ok"]:
+            st.success(result["message"])
+            counts = result.get("counts") or {}
+            if counts:
+                st.write("Current row counts:")
+                for table, count in counts.items():
+                    st.write(f"- `{table}`: {count}")
+        else:
+            st.error(result["message"])
 
 
 def _render_new_investigation_form() -> None:
