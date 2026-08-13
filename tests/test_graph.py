@@ -386,27 +386,110 @@ def test_human_review_does_not_resolve_high_confidence_without_confirmation():
     assert refetched.workflow_state["review_reason"]
 
 
-def test_human_review_flags_a_weakly_supported_hypothesis_without_asserting_a_cause():
-    investigation = create_investigation("low confidence")
+def test_human_review_still_requires_confirmed_even_with_structured_fields():
+    investigation = create_investigation("structured but unconfirmed")
     result = human_review_node(
         {
             "investigation_id": str(investigation.id),
-            "issue_description": "low confidence",
-            "top_hypothesis": _hypothesis(RESOLVE_CONFIDENCE_THRESHOLD, "a guess"),
-            "validation": _validation(confirmed=False),
+            "issue_description": "structured but unconfirmed",
+            "top_hypothesis": {
+                "description": "completed-order filter undercounts revenue",
+                "supporting_evidence": ["sql_analysis"],
+                "confidence_score": 0.95,
+                "claim_kind": "unknown",
+                "artifact": "sql_models/02_fct_daily_revenue.sql",
+            },
+            "validation": _validation(confirmed=False, gap="unclassifiable_claim"),
             "retry_count": MAX_RETRIES,
             "validation_pass_count": MAX_VALIDATION_PASSES,
             "evidence": [],
         }
     )
 
-    # Sitting exactly on the threshold is not "above" it.
     assert result["status"] == InvestigationStatus.NEEDS_HUMAN_REVIEW.value
     assert result["final_root_cause"] is None
 
-    refetched = get_investigation(investigation.id)
-    assert refetched.status == InvestigationStatus.NEEDS_HUMAN_REVIEW
-    assert refetched.final_root_cause is None
+
+def test_human_review_resolves_confirmed_hypothesis_at_exact_threshold():
+    """Inclusive gate: confirmed + confidence == 0.8 resolves."""
+    investigation = create_investigation("exact threshold")
+    result = human_review_node(
+        {
+            "investigation_id": str(investigation.id),
+            "issue_description": "exact threshold",
+            "top_hypothesis": _hypothesis(
+                RESOLVE_CONFIDENCE_THRESHOLD,
+                "build_fct_daily_revenue failed and left fct stale",
+            ),
+            "validation": _validation(confirmed=True),
+            "retry_count": 0,
+            "validation_pass_count": 1,
+            "evidence": [],
+        }
+    )
+
+    assert result["status"] == InvestigationStatus.RESOLVED.value
+    assert (
+        result["final_root_cause"]
+        == "build_fct_daily_revenue failed and left fct stale"
+    )
+
+
+def test_human_review_resolves_confirmed_hypothesis_at_float_threshold():
+    investigation = create_investigation("float threshold")
+    result = human_review_node(
+        {
+            "investigation_id": str(investigation.id),
+            "issue_description": "float threshold",
+            "top_hypothesis": _hypothesis(
+                0.80000000000000004,
+                "INNER JOIN drops unmatched rows",
+            ),
+            "validation": _validation(confirmed=True),
+            "retry_count": 0,
+            "validation_pass_count": 1,
+            "evidence": [],
+        }
+    )
+
+    assert result["status"] == InvestigationStatus.RESOLVED.value
+    assert result["final_root_cause"] == "INNER JOIN drops unmatched rows"
+
+
+def test_human_review_does_not_resolve_confirmed_just_below_threshold():
+    investigation = create_investigation("just below threshold")
+    result = human_review_node(
+        {
+            "investigation_id": str(investigation.id),
+            "issue_description": "just below threshold",
+            "top_hypothesis": _hypothesis(0.79, "duplicate transactions inflate revenue"),
+            "validation": _validation(confirmed=True),
+            "retry_count": MAX_RETRIES,
+            "validation_pass_count": MAX_VALIDATION_PASSES,
+            "evidence": [],
+        }
+    )
+
+    assert result["status"] == InvestigationStatus.NEEDS_HUMAN_REVIEW.value
+    assert result["final_root_cause"] is None
+
+
+def test_human_review_does_not_resolve_contradicted_high_confidence():
+    investigation = create_investigation("contradicted high confidence")
+    result = human_review_node(
+        {
+            "investigation_id": str(investigation.id),
+            "issue_description": "contradicted high confidence",
+            "top_hypothesis": _hypothesis(0.99, "INNER JOIN drops unmatched rows"),
+            "validation": _validation(confirmed=False, gap="join_not_present"),
+            "retry_count": MAX_RETRIES,
+            "validation_pass_count": MAX_VALIDATION_PASSES,
+            "evidence": [],
+        }
+    )
+
+    assert result["status"] == InvestigationStatus.NEEDS_HUMAN_REVIEW.value
+    assert result["final_root_cause"] is None
 
 
 def test_lineage_agent_node_tags_evidence_with_lineage_source():

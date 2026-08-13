@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import pytest
 
-from app.graph.validation import classify_claim, validate_hypothesis
+from app.graph.validation import classify_claim, resolve_claim_kind, validate_hypothesis
+from app.graph.root_cause import _heuristic_generate_hypotheses
 from app.sandbox_data.incidents import (
     common,
     incident_01_join_bug,
@@ -31,12 +32,23 @@ def clean_sandbox_afterwards():
     common.reset_to_clean_baseline()
 
 
-def hypothesis(description: str, confidence: float = 0.9) -> dict:
-    return {
+def hypothesis(
+    description: str,
+    confidence: float = 0.9,
+    *,
+    claim_kind: str | None = None,
+    artifact: str | None = None,
+) -> dict:
+    item = {
         "description": description,
         "supporting_evidence": [],
         "confidence_score": confidence,
     }
+    if claim_kind is not None:
+        item["claim_kind"] = claim_kind
+    if artifact is not None:
+        item["artifact"] = artifact
+    return item
 
 
 @pytest.mark.parametrize(
@@ -187,3 +199,109 @@ def test_duplicate_claim_is_contradicted_on_the_clean_baseline():
 
     assert outcome["confirmed"] is False
     assert outcome["gap"] == "duplicates_absent"
+
+
+def test_structured_claim_kind_wins_over_misleading_keywords():
+    """Status/exclude wording would classify as unknown; structured join wins."""
+    incident_01_join_bug.apply()
+
+    outcome = validate_hypothesis(
+        hypothesis(
+            "In fct_daily_revenue.sql, WHERE status='completed' may exclude "
+            "valid orders and undercount revenue.",
+            claim_kind="join",
+            artifact="sql_models/01_stg_orders_cleaned.sql",
+        )
+    )
+
+    assert classify_claim(
+        "In fct_daily_revenue.sql, WHERE status='completed' may exclude "
+        "valid orders and undercount revenue."
+    ) == "unknown"
+    assert resolve_claim_kind(
+        hypothesis(
+            "In fct_daily_revenue.sql, WHERE status='completed' may exclude "
+            "valid orders and undercount revenue.",
+            claim_kind="join",
+            artifact="sql_models/01_stg_orders_cleaned.sql",
+        )
+    ) == "join"
+    assert outcome["claim_kind"] == "join"
+    assert outcome["confirmed"] is True
+    assert "01_stg_orders_cleaned.sql" in outcome["note"]
+
+
+def test_missing_claim_kind_falls_back_to_keyword_classification():
+    incident_01_join_bug.apply()
+    legacy = {
+        "description": (
+            "sql_models/01_stg_orders_cleaned.sql uses an INNER JOIN against "
+            "raw_customers, dropping orders from brand-new customers."
+        ),
+        "supporting_evidence": [],
+        "confidence_score": 0.9,
+    }
+    assert "claim_kind" not in legacy
+
+    outcome = validate_hypothesis(legacy)
+
+    assert outcome["claim_kind"] == "join"
+    assert outcome["confirmed"] is True
+
+
+def test_explicit_unknown_with_high_confidence_is_not_confirmed():
+    outcome = validate_hypothesis(
+        hypothesis(
+            "fct_daily_revenue.sql only includes completed orders, "
+            "potentially excluding valid orders and undercounting revenue.",
+            confidence=0.95,
+            claim_kind="unknown",
+            artifact="sql_models/02_fct_daily_revenue.sql",
+        )
+    )
+
+    assert outcome["confirmed"] is False
+    assert outcome["claim_kind"] == "unknown"
+    assert outcome["gap"] == "unclassifiable_claim"
+
+
+def test_status_filter_wording_without_structured_kind_stays_unconfirmed():
+    outcome = validate_hypothesis(
+        hypothesis(
+            "In fct_daily_revenue.sql, the WHERE status = 'completed' filter "
+            "may exclude valid orders and undercount revenue.",
+            confidence=0.85,
+        )
+    )
+
+    assert outcome["confirmed"] is False
+    assert outcome["claim_kind"] == "unknown"
+    assert outcome["gap"] == "unclassifiable_claim"
+
+
+def test_structured_wrong_artifact_is_contradicted():
+    incident_01_join_bug.apply()
+
+    outcome = validate_hypothesis(
+        hypothesis(
+            "An INNER JOIN is dropping unmatched customer orders.",
+            claim_kind="join",
+            artifact="sql_models/02_fct_daily_revenue.sql",
+        )
+    )
+
+    assert outcome["confirmed"] is False
+    assert outcome["gap"] == "join_wrong_model"
+
+
+def test_heuristic_hypotheses_are_unknown_without_artifact():
+    items = _heuristic_generate_hypotheses(
+        "revenue looks wrong",
+        [{"source": "lineage", "finding": "stg_orders_cleaned model", "confidence": 0.8}],
+        [],
+    )
+    assert items
+    for item in items:
+        assert item["claim_kind"] == "unknown"
+        assert item["artifact"] is None
+        assert item["confidence_score"] <= 0.6

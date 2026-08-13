@@ -15,11 +15,12 @@ import logging
 import re
 from typing import Callable, TypedDict
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.graph.llm import (
     LLMUnavailable,
     build_structured_llm,
+    coerce_llm_confidence,
     invoke_structured,
     llm_enabled,
 )
@@ -42,10 +43,19 @@ class _SqlReviewSchema(BaseModel):
         "(wrong join type, missing/incorrect filter, wrong de-dup key, "
         "etc.), or a short note that no obvious issue was found."
     )
-    confidence: float = Field(
+    # float | str so the tool JSON schema is number|string: Groq sometimes
+    # emits \"0.8\" and rejects a number-only schema before Pydantic runs.
+    # The validator always stores a real float and rejects non-numeric text.
+    confidence: float | str = Field(
         description="Confidence, from 0.0 to 1.0, that the finding above "
-        "explains the reported issue."
+        "explains the reported issue. Prefer a JSON number; numeric "
+        "strings such as \"0.8\" are also accepted."
     )
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _coerce_confidence(cls, value: object) -> float:
+        return coerce_llm_confidence(value)
 
 
 def _llm_review_sql(issue_description: str, table_name: str, sql_text: str) -> SqlReviewResult:
@@ -73,7 +83,7 @@ def _llm_review_sql(issue_description: str, table_name: str, sql_text: str) -> S
 
     return SqlReviewResult(
         finding=result.finding,
-        confidence=max(0.0, min(1.0, result.confidence)),
+        confidence=max(0.0, min(1.0, float(result.confidence))),
     )
 
 

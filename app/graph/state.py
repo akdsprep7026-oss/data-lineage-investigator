@@ -14,7 +14,7 @@ with the right agents, rather than restarting from scratch.
 from __future__ import annotations
 
 import operator
-from typing import Annotated, Literal, Optional, TypedDict
+from typing import Annotated, Literal, NotRequired, Optional, TypedDict
 
 
 class EvidenceEntry(TypedDict):
@@ -28,14 +28,33 @@ class EvidenceEntry(TypedDict):
     confidence: float
 
 
+# Which kind of bug a hypothesis is claiming. Root-cause may set this
+# explicitly; validation falls back to keyword classification when it is
+# absent or not one of the four checkable kinds. Determines which direct
+# re-check against the sandbox validation_node runs.
+ClaimKind = Literal["join", "stale_pipeline", "schema_change", "duplicates", "unknown"]
+
+CHECKABLE_CLAIM_KINDS = frozenset(
+    {"join", "stale_pipeline", "schema_change", "duplicates"}
+)
+
+
 class Hypothesis(TypedDict):
     """One candidate root-cause explanation, ranked by confidence.
     Mirrors the shape stored in investigations.hypotheses (see
-    app/db/models.py)."""
+    app/db/models.py).
+
+    `claim_kind`, `artifact`, and `failure_mode` are optional for
+    backward compatibility with older persisted rows and the offline
+    heuristic generator.
+    """
 
     description: str
     supporting_evidence: list[str]
     confidence_score: float
+    claim_kind: NotRequired[ClaimKind]
+    artifact: NotRequired[Optional[str]]
+    failure_mode: NotRequired[Optional[str]]
 
 
 class RelevantSqlModel(TypedDict):
@@ -45,12 +64,6 @@ class RelevantSqlModel(TypedDict):
     file_path: str
     table_name: str
     sql_text: str
-
-
-# Which kind of bug a hypothesis is claiming, as classified by
-# app/graph/validation.py. Determines which direct re-check against the
-# sandbox validation_node runs to try to confirm it.
-ClaimKind = Literal["join", "stale_pipeline", "schema_change", "duplicates", "unknown"]
 
 
 class ValidationOutcome(TypedDict):

@@ -13,6 +13,7 @@ from app.graph import llm as llm_module
 from app.graph.llm import (
     MAX_ATTEMPTS,
     LLMUnavailable,
+    coerce_llm_confidence,
     invoke_structured,
     llm_enabled,
     resolve_provider,
@@ -204,3 +205,127 @@ def test_root_cause_degrades_to_its_heuristic_when_the_model_is_unreachable(
 
     assert hypotheses
     assert all(0.0 <= item["confidence_score"] <= 1.0 for item in hypotheses)
+    assert all(item["claim_kind"] == "unknown" for item in hypotheses)
+    assert all(item["artifact"] is None for item in hypotheses)
+
+
+def test_root_cause_maps_structured_claim_kind_and_artifact(monkeypatch):
+    """Stubbed LLM response populates claim_kind/artifact on Hypothesis."""
+    from app.graph import root_cause
+    from app.graph.validation import resolve_claim_kind, validate_hypothesis
+    from app.sandbox_data.incidents import incident_01_join_bug
+
+    schema_result = root_cause._RootCauseSchema(
+        hypotheses=[
+            root_cause._HypothesisItem(
+                claim_kind="join",
+                artifact="sql_models/01_stg_orders_cleaned.sql",
+                failure_mode="INNER JOIN drops unmatched customer orders",
+                description=(
+                    "WHERE status='completed' wording that would keyword-classify "
+                    "as unknown, but the structured kind is join."
+                ),
+                supporting_evidence=["sql_analysis"],
+                confidence_score=0.88,
+            )
+        ]
+    )
+
+    monkeypatch.setenv("GOOGLE_API_KEY", "real-gemini-key")
+    monkeypatch.setattr(
+        root_cause,
+        "build_structured_llm",
+        lambda schema: StubLLM(result=schema_result),
+    )
+
+    hypotheses = root_cause._llm_generate_hypotheses(
+        "revenue undercounted",
+        [{"source": "sql_analysis", "finding": "INNER JOIN concern", "confidence": 0.7}],
+        [],
+    )
+    assert len(hypotheses) == 1
+    top = hypotheses[0]
+    assert top["claim_kind"] == "join"
+    assert top["artifact"] == "sql_models/01_stg_orders_cleaned.sql"
+    assert top["confidence_score"] == 0.88
+    assert resolve_claim_kind(top) == "join"
+
+    incident_01_join_bug.apply()
+    outcome = validate_hypothesis(top)
+    assert outcome["claim_kind"] == "join"
+    assert outcome["confirmed"] is True
+
+
+def test_coerce_llm_confidence_accepts_numeric_forms():
+    assert coerce_llm_confidence(0.8) == 0.8
+    assert coerce_llm_confidence(1) == 1.0
+    assert coerce_llm_confidence("0.8") == 0.8
+    assert coerce_llm_confidence(" 1.0 ") == 1.0
+    with pytest.raises(ValueError):
+        coerce_llm_confidence("high")
+    with pytest.raises(ValueError):
+        coerce_llm_confidence(True)
+
+
+def test_sql_review_schema_accepts_numeric_string_confidence():
+    from app.graph.sql_review import _SqlReviewSchema
+
+    parsed = _SqlReviewSchema.model_validate(
+        {"finding": "possible INNER JOIN issue", "confidence": "0.8"}
+    )
+    assert parsed.confidence == 0.8
+    assert isinstance(parsed.confidence, float)
+
+    parsed_int = _SqlReviewSchema.model_validate(
+        {"finding": "possible INNER JOIN issue", "confidence": 1}
+    )
+    assert parsed_int.confidence == 1.0
+
+    parsed_float = _SqlReviewSchema.model_validate(
+        {"finding": "possible INNER JOIN issue", "confidence": 0.55}
+    )
+    assert parsed_float.confidence == 0.55
+
+    with pytest.raises(Exception):
+        _SqlReviewSchema.model_validate(
+            {"finding": "x", "confidence": "high"}
+        )
+
+    schema = _SqlReviewSchema.model_json_schema()
+    confidence_schema = schema["properties"]["confidence"]
+    assert "anyOf" in confidence_schema
+    types = {item.get("type") for item in confidence_schema["anyOf"]}
+    assert types == {"number", "string"}
+
+
+def test_root_cause_schema_accepts_numeric_string_confidence():
+    from app.graph.root_cause import _HypothesisItem
+
+    item = _HypothesisItem.model_validate(
+        {
+            "claim_kind": "join",
+            "artifact": "sql_models/01_stg_orders_cleaned.sql",
+            "failure_mode": "INNER JOIN drops rows",
+            "description": "join drops rows",
+            "supporting_evidence": ["sql_analysis"],
+            "confidence_score": "0.9",
+        }
+    )
+    assert item.confidence_score == 0.9
+    assert isinstance(item.confidence_score, float)
+
+
+def test_tool_schema_mismatch_is_degradable_to_llm_unavailable(monkeypatch, no_sleeping):
+    monkeypatch.setenv("GOOGLE_API_KEY", "real-gemini-key")
+    stub = StubLLM(
+        errors=[
+            RuntimeError(
+                "Error code: 400 - tool call validation failed: "
+                "parameters for tool _SqlReviewSchema did not match schema "
+                "(tool_use_failed / failed_generation)"
+            )
+        ]
+    )
+    with pytest.raises(LLMUnavailable):
+        invoke_structured(stub, "prompt", purpose="SQL review")
+    assert stub.calls == 1

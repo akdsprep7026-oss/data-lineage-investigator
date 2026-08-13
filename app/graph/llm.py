@@ -106,12 +106,41 @@ DEGRADABLE_MARKERS = (
     "model_not_found",
     "does not exist",
     "decommissioned",
+    # Groq/tool structured-output rejections that retrying will not fix;
+    # callers should fall back to their offline heuristic for this step.
+    "tool_use_failed",
+    "did not match schema",
+    "failed_generation",
 )
 
 
 class LLMUnavailable(RuntimeError):
     """The model couldn't be reached for this call. Callers should fall
     back to their offline heuristic rather than failing the run."""
+
+
+def coerce_llm_confidence(value: Any) -> float:
+    """Coerce LLM structured-output confidence to float.
+
+    Accepts ints/floats and numeric strings such as \"0.8\" (Groq
+    occasionally emits those). Rejects bools and non-numeric strings so
+    garbage cannot silently become 0.0.
+    """
+    if isinstance(value, bool):
+        raise ValueError("confidence must be numeric, not boolean")
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            return float(text)
+        except ValueError as exc:
+            raise ValueError(
+                f"confidence must be a number, got {value!r}"
+            ) from exc
+    raise ValueError(
+        f"confidence must be a number, got {type(value).__name__}"
+    )
 
 
 def _configured_key(provider: str) -> Optional[str]:

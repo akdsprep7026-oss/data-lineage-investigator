@@ -36,7 +36,12 @@ from typing import NamedTuple, Optional
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.graph.state import ClaimKind, Hypothesis, ValidationOutcome
+from app.graph.state import (
+    CHECKABLE_CLAIM_KINDS,
+    ClaimKind,
+    Hypothesis,
+    ValidationOutcome,
+)
 from app.sandbox_data.models import get_engine
 
 SANDBOX_DIR = Path(__file__).resolve().parents[1] / "sandbox_data"
@@ -537,6 +542,33 @@ CLAIM_CHECKS = {
 }
 
 
+def resolve_claim_kind(hypothesis: Hypothesis) -> ClaimKind:
+    """Prefer an explicit checkable claim_kind; else keyword-classify.
+
+    Structured kinds from root-cause win over misleading description
+    keywords. Absent / unknown / invalid kinds fall back to
+    classify_claim(description) so older persisted hypotheses still work.
+    """
+    structured = hypothesis.get("claim_kind")
+    if structured in CHECKABLE_CLAIM_KINDS:
+        return structured  # type: ignore[return-value]
+    return classify_claim(hypothesis["description"])
+
+
+def _attribution_text(hypothesis: Hypothesis) -> str:
+    """Description plus optional structured artifact for naming checks.
+
+    Existing CLAIM_CHECKS attribute using substring matches against the
+    claim text; folding artifact in preserves those helpers without
+    rewriting them. A wrong artifact still cannot confirm a claim.
+    """
+    description = hypothesis["description"]
+    artifact = hypothesis.get("artifact")
+    if artifact:
+        return f"{description}\n{artifact}"
+    return description
+
+
 def validate_hypothesis(hypothesis: Optional[Hypothesis]) -> ValidationOutcome:
     """Re-checks a hypothesis against the sandbox warehouse directly and
     reports whether the claim holds up."""
@@ -549,8 +581,7 @@ def validate_hypothesis(hypothesis: Optional[Hypothesis]) -> ValidationOutcome:
             gap="no_hypothesis",
         )
 
-    description = hypothesis["description"]
-    claim_kind = classify_claim(description)
+    claim_kind = resolve_claim_kind(hypothesis)
     if claim_kind == "unknown":
         return ValidationOutcome(
             claim_kind="unknown",
@@ -565,4 +596,4 @@ def validate_hypothesis(hypothesis: Optional[Hypothesis]) -> ValidationOutcome:
             gap="unclassifiable_claim",
         )
 
-    return CLAIM_CHECKS[claim_kind](description)
+    return CLAIM_CHECKS[claim_kind](_attribution_text(hypothesis))

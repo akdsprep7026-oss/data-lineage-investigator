@@ -147,7 +147,7 @@ def main() -> None:
     if top_hypothesis:
         print(
             f"  top hypothesis (confidence={top_hypothesis['confidence_score']:.2f}, "
-            f"auto-resolve threshold > {RESOLVE_CONFIDENCE_THRESHOLD}):\n"
+            f"auto-resolve threshold >= {RESOLVE_CONFIDENCE_THRESHOLD}):\n"
             f"      {_wrap(top_hypothesis['description'])}"
         )
     print(f"  final_root_cause: {_wrap(str(final_state['final_root_cause']))}")

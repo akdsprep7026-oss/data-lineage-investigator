@@ -141,9 +141,10 @@ MAX_RETRIES = 2
 # retry_count cannot keep the graph looping forever.
 MAX_VALIDATION_PASSES = MAX_RETRIES + 1
 
-# Above this, human_review_node closes the investigation as resolved;
-# at or below it, the investigation is flagged for a human instead of
-# asserting a conclusion the evidence doesn't support.
+# At or above this, human_review_node closes the investigation as resolved
+# when validation also confirmed the claim; below it, the investigation is
+# flagged for a human instead of asserting a conclusion the evidence
+# doesn't support.
 RESOLVE_CONFIDENCE_THRESHOLD = 0.8
 
 # Even a hypothesis the re-check agrees with is worth another evidence
@@ -736,13 +737,13 @@ def validation_node(state: InvestigationState) -> dict:
 @traced_node("human_review")
 def human_review_node(state: InvestigationState) -> dict:
     """Terminal node. Closes the investigation as RESOLVED only when the
-    top hypothesis both clears RESOLVE_CONFIDENCE_THRESHOLD *and* was
-    confirmed by validation_node; otherwise marks it NEEDS_HUMAN_REVIEW
-    and leaves final_root_cause unset rather than asserting a conclusion
-    the evidence doesn't support.
+    top hypothesis meets RESOLVE_CONFIDENCE_THRESHOLD (inclusive) *and*
+    was confirmed by validation_node; otherwise marks it
+    NEEDS_HUMAN_REVIEW and leaves final_root_cause unset rather than
+    asserting a conclusion the evidence doesn't support.
 
-    A hypothesis sitting exactly on the threshold is treated as not
-    clearing it, on the same don't-fabricate-certainty principle.
+    Confidence alone never resolves: unconfirmed / contradicted /
+    unknown claims stay in human review even at high confidence.
     """
     _record_transition(state, "human_review")
     top_hypothesis = state.get("top_hypothesis")
@@ -752,7 +753,7 @@ def human_review_node(state: InvestigationState) -> dict:
     retries_used = state.get("retry_count", 0)
     validation_passes = state.get("validation_pass_count", 0)
 
-    if confirmed and confidence > RESOLVE_CONFIDENCE_THRESHOLD:
+    if confirmed and confidence >= RESOLVE_CONFIDENCE_THRESHOLD:
         status = InvestigationStatus.RESOLVED
         final_root_cause = top_hypothesis["description"]
         review_reason = None
