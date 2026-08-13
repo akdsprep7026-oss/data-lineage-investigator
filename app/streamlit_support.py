@@ -26,12 +26,12 @@ SANDBOX_SEED_COMMAND = "python -m app.sandbox_data.seed"
 # Opt-in Streamlit sidebar panel for applying sandbox incidents on a live
 # process (local or Community Cloud). Off unless ENABLE_SANDBOX_DEBUG=true.
 SANDBOX_DEBUG_CLEAN = "clean baseline"
-SANDBOX_DEBUG_OPTIONS: tuple[tuple[str, str], ...] = (
+SANDBOX_DEBUG_OPTIONS = (
     (SANDBOX_DEBUG_CLEAN, "clean baseline"),
-    ("1", "1 — join bug"),
-    ("2", "2 — stale pipeline"),
-    ("3", "3 — schema change"),
-    ("4", "4 — duplicate rows"),
+    ("1", "1 - join bug"),
+    ("2", "2 - stale pipeline"),
+    ("3", "3 - schema change"),
+    ("4", "4 - duplicate rows"),
 )
 REQUIRED_WAREHOUSE_TABLES = frozenset(
     {
