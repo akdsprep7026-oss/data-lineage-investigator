@@ -1,4 +1,4 @@
-# Data Lineage Investigator
+# TRACEREX: A multi-agent Data Lineage Investigator
 
 Multi-agent system that investigates data-pipeline incidents — missing revenue, stale dashboards, schema breakages, duplicate rows — by gathering evidence across lineage, SQL models, warehouse tables, ETL job history, and schema metadata, then generating ranked hypotheses and independently validating the strongest hypothesis against the warehouse, SQL artifacts, pipeline metadata, and schema.
 
