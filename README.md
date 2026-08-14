@@ -316,3 +316,7 @@ Expected **208+** passed on the current tree (see current run for the exact coun
 - **LLM variance.** Confidence and prose can vary by provider/run. The hard safety invariant is: no resolve without `validation.confirmed`, and no resolve for unclassifiable / contradicted claims.
 - **Gemini free-tier quota** can be tight for iterative eval; Groq was used for the main calibration campaign; when the provider quota is exhausted, the system degrades to evidence-backed signal classification and ultimately heuristic fallback while preserving the same independent validation gate (Prefer `LLM_PROVIDER=groq` for heavy local loops when Gemini quota is exhausted).
 
+
+DEMO LINK:-
+https://data-lineage-investigator-cyptnxyqtu87xyjsnsseyc.streamlit.app/
+
