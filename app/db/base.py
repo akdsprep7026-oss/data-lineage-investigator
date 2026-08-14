@@ -273,7 +273,7 @@ def get_database_url() -> str:
         # Production/staging: honor the configured DSN. Do not fall back
         # to embedded Postgres if Neon (or any remote) is briefly unreachable.
         try:
-            probe_engine = create_engine(database_url)
+            probe_engine = create_engine(database_url, pool_pre_ping=True)
             with probe_engine.connect():
                 pass
         except Exception as exc:
@@ -289,7 +289,7 @@ def get_database_url() -> str:
 def get_engine() -> Engine:
     global _engine
     if _engine is None:
-        _engine = create_engine(get_database_url())
+        _engine = create_engine(get_database_url(), pool_pre_ping=True)
     return _engine
 
 
