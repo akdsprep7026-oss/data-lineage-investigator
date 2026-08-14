@@ -397,6 +397,5 @@ pytest
 - **Sandbox, not production.** The warehouse, SQL models, pipeline job log, and incidents are a simulated local environment designed for reproducible demos and evaluation — not a connection to a real production data platform.
 
 
-Demo of UI:-
-<img width="1167" height="531" alt="image" src="https://github.com/user-attachments/assets/b0871a95-8a49-4f7f-a959-5d493f1a65aa" />
+
 
