@@ -209,13 +209,22 @@ def build_structured_llm(schema: type) -> Optional[Any]:
         from langchain_groq import ChatGroq
 
         model = ChatGroq(model=GROQ_MODEL, temperature=0)
+
+        return model.with_structured_output(
+            schema,
+            method="json_schema",
+            strict=False,
+        )
+
     else:
         from langchain_google_genai import ChatGoogleGenerativeAI
 
-        model = ChatGoogleGenerativeAI(model=GEMINI_MODEL, temperature=0)
+        model = ChatGoogleGenerativeAI(
+            model=GEMINI_MODEL,
+            temperature=0,
+        )
 
-    return model.with_structured_output(schema)
-
+        return model.with_structured_output(schema)
 
 def _matches(exc: BaseException, markers: tuple[str, ...]) -> bool:
     text = f"{type(exc).__name__} {exc}".lower()
