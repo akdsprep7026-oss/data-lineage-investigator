@@ -51,7 +51,7 @@ PROVIDERS = ("gemini", "groq")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 # Groq deprecates models on fairly short notice, so this is overridable
 # without a code change. See https://console.groq.com/docs/models.
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
 API_KEY_ENV_VARS = {"gemini": "GOOGLE_API_KEY", "groq": "GROQ_API_KEY"}
 
