@@ -8,6 +8,7 @@ langchain
 # LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_BASE_URL from .env.
 langfuse
 psycopg2-binary
+psycopg[binary]>=3,<4
 sqlalchemy
 chromadb
 langchain-google-genai
